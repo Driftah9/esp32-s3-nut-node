@@ -24,12 +24,26 @@ The ESP32 connects to the UPS via USB HID, decodes the interrupt stream, and spe
 
 | Component | Details |
 |-----------|---------|
-| MCU | ESP32-S3 (tested on generic devkit) |
+| MCU | Hosyond ESP32-S3-WROOM-1 N16R8 devkit |
 | UPS | APC Back-UPS XS 1500M (USB HID, VID:PID 051d:0002) |
-| Connection | USB OTG (ESP32-S3 acts as USB host) |
-| Power | USB-C (devkit powered separately from UPS USB) |
+| UPS connection | USB-A → OTG port on ESP32-S3 (device acts as USB host) |
+| Power | USB-C port (powered independently from UPS USB) |
 
-Other APC UPS models with HID interface should work — the parser has model-aware decode for XS1500M with generic fallback.
+**Board used:** [Hosyond 3Pack ESP32-S3 Development Board N16R8 — Amazon](https://www.amazon.com/dp/B0F5QCK6X5)
+
+This board has two USB-C ports — one for power/programming and one OTG port for USB host use. The OTG port is what connects to the UPS.
+
+> **⚠️ Hardware mod required for single-cable power:**
+> This board does not power itself from the OTG port by default. To run the ESP32
+> from a single cable (UPS USB only), the 5V pads between the USB-C power port
+> and the OTG port must be bridged with a solder joint.
+>
+> Without this mod, the board requires a **separate USB-C power source** in
+> addition to the UPS USB cable. If powering from a dedicated USB-C supply
+> (wall adapter, Proxmox USB port, etc.), no modification is needed — power
+> via USB-C and connect the UPS to the OTG port independently.
+
+Other APC UPS models with a USB HID interface should work — the parser has model-aware decode for the XS1500M with a generic APC fallback.
 
 ---
 
