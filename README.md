@@ -64,8 +64,6 @@ idf.py build flash -p /dev/ttyUSB0
 idf.py monitor -p /dev/ttyUSB0
 ```
 
-First boot: connect to the `ESP32-UPS-SETUP-XXXXXX` SoftAP, navigate to `http://192.168.4.1/config`, configure Wi-Fi credentials.
-
 ---
 
 ## First boot setup
@@ -73,10 +71,10 @@ First boot: connect to the `ESP32-UPS-SETUP-XXXXXX` SoftAP, navigate to `http://
 1. Power the ESP32 (UPS USB cable plugged into OTG port)
 2. Connect to Wi-Fi SSID: `ESP32-UPS-SETUP-XXXXXX`
 3. Open `http://192.168.4.1/config`
-4. Login: `admin` / `upsmon` (default — you will be prompted to change this)
+4. Login: `admin` / `upsmon` — **change this immediately under Portal Security**
 5. Set your Wi-Fi SSID and password, save
 6. Device connects to your network, SoftAP turns off
-7. Find the device IP at `http://192.168.4.1/status` or via your router
+7. Find the device IP via your router DHCP table or check the serial monitor
 
 ---
 
@@ -84,13 +82,45 @@ First boot: connect to the `ESP32-UPS-SETUP-XXXXXX` SoftAP, navigate to `http://
 
 | Route | Auth | Description |
 |-------|------|-------------|
-| `GET /` | ✅ | Live dashboard |
+| `GET /` | ✅ | Live dashboard (AJAX, updates every 5s) |
 | `GET /config` | ✅ | Configuration form |
 | `POST /save` | ✅ | Save config to NVS |
-| `GET /status` | ❌ | JSON snapshot (open) |
+| `GET /status` | ❌ | JSON snapshot (always open) |
 | `GET /reboot` | ✅ | Reboot device |
 
-Auth: HTTP Basic, username `admin`, password set in portal.
+Auth: HTTP Basic, username `admin`, password set in portal (default: `upsmon`).
+
+---
+
+## NUT credentials
+
+The NUT server credentials (set in `/config` under NUT Identity) default to:
+
+| Field | Default |
+|-------|---------|
+| UPS Name | `ups` |
+| NUT Username | `admin` |
+| NUT Password | `admin` |
+
+**Change these before exposing to your network.** Any NUT client connecting to tcp/3493 must use these credentials.
+
+---
+
+## Using with NUT clients
+
+```bash
+# Direct query (replace with your device IP)
+upsc ups@<device-ip>
+
+# Via NUT hub (recommended for multi-client setups)
+upsc <ups-name>@<hub-ip>
+```
+
+Home Assistant: Settings → Integrations → Add → Network UPS Tool (NUT)
+- Host: `<device-ip>`
+- Port: `3493`
+- Username: `<nut-username>`
+- Password: `<nut-password>`
 
 ---
 
@@ -105,25 +135,22 @@ main/
   nut_server.c/h      — NUT protocol server (tcp/3493)
   ups_state.c/h       — Shared UPS state, mutex-protected snapshot
   ups_usb_hid.c/h     — USB HID host, interrupt IN reader
-  ups_hid_parser.c/h  — Report decode, model-aware (XS1500M + generic)
+  ups_hid_parser.c/h  — Report decode, model-aware (XS1500M + generic APC)
 CMakeLists.txt
-sdkconfig               — saved menuconfig state
+sdkconfig               — menuconfig state (flash size, Wi-Fi region, etc.)
 ```
 
 ---
 
-## Using with NUT clients
+## sdkconfig notes
 
-```bash
-# Direct query
-upsc ups@<device-ip>
+The committed `sdkconfig` reflects the build target used during development
+(ESP32-S3, 2MB flash, 160MHz). If your board differs, run `idf.py menuconfig`
+to adjust before building — key settings:
 
-# Via NUT hub (recommended for multi-client)
-# See docs/linux/M9-nut-hub-setup.md
-upsc xs1500m@<hub-ip>
-```
-
-Home Assistant: Settings → Integrations → NUT → host: `<device-ip>`, port: `3493`
+- `CONFIG_IDF_TARGET` — must be `esp32s3`
+- `CONFIG_ESPTOOLPY_FLASHSIZE` — match your board (2MB or 4MB common)
+- `CONFIG_ESP32S3_DEFAULT_CPU_FREQ_MHZ` — 160 or 240
 
 ---
 
