@@ -19,6 +19,20 @@
              JSON every 5s and updates table cells in-place. Polling only
              runs while the page is open (no background activity). Config
              page and /status endpoint unchanged.
+ R11  v15.5  Version bump. Expanded /status JSON to include all live UPS
+             metrics (runtime, voltages). AJAX now updates all live cells.
+             Manufacturer/model shown regardless of ups.valid (set at USB
+             enumeration, always available after first connect).
+ R12  v15.6  Version string bump only (runtime decode in ups_hid_parser).
+ R13  v15.7  Dynamic dashboard: always show Manufacturer/Model/Driver/Status.
+             Optional rows (Charge/Runtime/Batt Voltage/Load) only rendered
+             when valid. AJAX adds/removes rows dynamically per /status JSON.
+             Remove input.voltage and output.voltage from portal entirely.
+ R14  v15.8  Re-add input_voltage_v and output_voltage_v to /status JSON.
+             AJAX adds tr_ivolt / tr_ovolt rows when Feature report data arrives.
+             Version bump throughout.
+ R15  v15.8  Add GET /compat — Compatible UPS device list page.
+             Source of truth: ups_device_db.c. Three confirmed devices marked.
 
 ============================================================================*/
 
@@ -49,7 +63,7 @@ static const char *TAG = "http_portal";
 #define HTTP_PORT     80
 #define HTTP_RX_MAX   4096
 #define HTTP_BODY_MAX 2048
-#define HTTP_PAGE_BUF 4096
+#define HTTP_PAGE_BUF 5120   /* bumped from 4096 — expanded JSON + JS */
 
 /* -------------------------------------------------------------------------
  * String utilities
@@ -207,59 +221,97 @@ static bool check_auth(const app_cfg_t *cfg, const char *headers, const char *hd
 /* -------------------------------------------------------------------------
  * Dashboard page   GET /
  *
- * Static table rendered server-side on first load.
- * A small inline <script> then polls /status every 5 seconds and updates
- * only the live data cells — no page reload, no polling when tab is closed.
+ * Static table on first load. AJAX polls /status every 5s and updates
+ * all live metric cells in-place — no page reload.
  *
- * Cell IDs polled from /status JSON:
- *   td_status  <- ups_status
- *   td_charge  <- battery_charge
- *   td_ip      <- sta_ip
+ * Cell IDs updated from /status JSON:
+ *   td_status   <- ups_status
+ *   td_charge   <- battery_charge (%)
+ *   td_runtime  <- battery_runtime_s (seconds) or "-"
+ *   td_bvolt    <- battery_voltage (V) or "-"
+ *   td_ivolt    <- input_voltage (V) or "-"
+ *   td_ovolt    <- output_voltage (V) or "-"
+ *   td_load     <- ups_load (%) or "-"
+ *   td_ip       <- sta_ip
  *
- * All other fields (mfr, model, voltages, load) come from the initial
- * server render. They change rarely and update on next manual refresh.
- * Adding more live fields is trivial — extend the JS updateCells() function.
+ * Manufacturer / model are static (set at USB enumeration, never change
+ * during a session) and are NOT polled.
  * ---------------------------------------------------------------------- */
 
+/*
+ * render_dashboard — dynamic table.
+ *
+ * Static rows (always present):
+ *   Manufacturer | Model | Driver | Status | STA IP
+ *
+ * Optional rows — rendered on initial load only when the field is valid.
+ * AJAX polls /status every 5s and dynamically adds rows that become valid
+ * or updates rows that already exist.  Rows are never removed once shown.
+ *
+ * Optional row IDs:
+ *   tr_charge   battery.charge (%)
+ *   tr_runtime  battery.runtime (s)
+ *   tr_bvolt    battery.voltage (V)
+ *   tr_load     ups.load (%)
+ */
 static void render_dashboard(app_cfg_t *cfg, char *out, size_t outsz) {
     ups_state_t ups;
     ups_state_snapshot(&ups);
 
     const char *st = ups.ups_status[0] ? ups.ups_status : "UNKNOWN";
-
-    char s_mfr[80], s_model[80];
-    char s_charge[20], s_runtime[24], s_bvolt[20];
-    char s_ivolt[20],  s_ovolt[20],   s_load[20];
-
-    strlcpy0(s_mfr,   (ups.valid && ups.manufacturer[0]) ? ups.manufacturer : "-", sizeof(s_mfr));
-    strlcpy0(s_model, (ups.valid && ups.product[0])      ? ups.product      : "-", sizeof(s_model));
-
-    if (ups.valid && ups.battery_charge > 0)
-        snprintf(s_charge, sizeof(s_charge), "%u%%", ups.battery_charge);
-    else strlcpy0(s_charge, "-", sizeof(s_charge));
-
-    if (ups.valid && ups.battery_runtime_valid)
-        snprintf(s_runtime, sizeof(s_runtime), "%lu s", (unsigned long)ups.battery_runtime_s);
-    else strlcpy0(s_runtime, "-", sizeof(s_runtime));
-
-    if (ups.valid && ups.battery_voltage_valid)
-        snprintf(s_bvolt, sizeof(s_bvolt), "%.3f V", ups.battery_voltage_mv / 1000.0f);
-    else strlcpy0(s_bvolt, "-", sizeof(s_bvolt));
-
-    if (ups.valid && ups.input_voltage_valid)
-        snprintf(s_ivolt, sizeof(s_ivolt), "%.1f V", ups.input_voltage_mv / 1000.0f);
-    else strlcpy0(s_ivolt, "-", sizeof(s_ivolt));
-
-    if (ups.valid && ups.output_voltage_valid)
-        snprintf(s_ovolt, sizeof(s_ovolt), "%.1f V", ups.output_voltage_mv / 1000.0f);
-    else strlcpy0(s_ovolt, "-", sizeof(s_ovolt));
-
-    if (ups.valid && ups.ups_load_valid)
-        snprintf(s_load, sizeof(s_load), "%u%%", ups.ups_load_pct);
-    else strlcpy0(s_load, "-", sizeof(s_load));
-
-    char sta_ip[16];
+    char s_mfr[80], s_model[80], sta_ip[16];
+    strlcpy0(s_mfr,   ups.manufacturer[0] ? ups.manufacturer : "-", sizeof(s_mfr));
+    strlcpy0(s_model, ups.product[0]      ? ups.product      : "-", sizeof(s_model));
     wifi_mgr_sta_ip_str(sta_ip);
+
+    /* Build optional rows for initial static render */
+    char opt_rows[512] = {0};
+    size_t opt_len = 0;
+
+    if (ups.battery_charge > 0 || ups.valid) {
+        char tmp[128];
+        snprintf(tmp, sizeof(tmp),
+            "<tr id='tr_charge'><th>Charge</th><td id='td_charge'>%u%%</td></tr>",
+            ups.battery_charge);
+        strlcat(opt_rows, tmp, sizeof(opt_rows));
+    }
+    if (ups.battery_runtime_valid) {
+        char tmp[128];
+        snprintf(tmp, sizeof(tmp),
+            "<tr id='tr_runtime'><th>Runtime</th><td id='td_runtime'>%lu s</td></tr>",
+            (unsigned long)ups.battery_runtime_s);
+        strlcat(opt_rows, tmp, sizeof(opt_rows));
+    }
+    if (ups.battery_voltage_valid) {
+        char tmp[128];
+        snprintf(tmp, sizeof(tmp),
+            "<tr id='tr_bvolt'><th>Batt Voltage</th><td id='td_bvolt'>%.3f V</td></tr>",
+            ups.battery_voltage_mv / 1000.0f);
+        strlcat(opt_rows, tmp, sizeof(opt_rows));
+    }
+    if (ups.ups_load_valid) {
+        char tmp[128];
+        snprintf(tmp, sizeof(tmp),
+            "<tr id='tr_load'><th>Load</th><td id='td_load'>%u%%</td></tr>",
+            ups.ups_load_pct);
+        strlcat(opt_rows, tmp, sizeof(opt_rows));
+    }
+    if (ups.input_voltage_valid) {
+        char tmp[128];
+        snprintf(tmp, sizeof(tmp),
+            "<tr id='tr_ivolt'><th>Input Voltage</th><td id='td_tr_ivolt'>%.1f V</td></tr>",
+            ups.input_voltage_mv / 1000.0f);
+        strlcat(opt_rows, tmp, sizeof(opt_rows));
+    }
+    if (ups.output_voltage_valid) {
+        char tmp[128];
+        snprintf(tmp, sizeof(tmp),
+            "<tr id='tr_ovolt'><th>Output Voltage</th><td id='td_tr_ovolt'>%.1f V</td></tr>",
+            ups.output_voltage_mv / 1000.0f);
+        strlcat(opt_rows, tmp, sizeof(opt_rows));
+    }
+    opt_len = strlen(opt_rows);
+    (void)opt_len;
 
     const char *pw_warn = cfg_store_is_default_pass(cfg)
         ? "<p><b>** Security: Default password in use. "
@@ -272,25 +324,34 @@ static void render_dashboard(app_cfg_t *cfg, char *out, size_t outsz) {
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<title>ESP32 UPS Node</title>"
         "</head><body>"
-        "<h2>ESP32-S3 UPS Node v14.25</h2>"
+        "<h2>ESP32-S3 UPS Node v15.8</h2>"
         "%s"
-        "<table border='1' cellpadding='4' cellspacing='0'>"
+        "<table id='ups_tbl' border='1' cellpadding='4' cellspacing='0'>"
         "<tr><th>Manufacturer</th><td>%s</td></tr>"
         "<tr><th>Model</th><td>%s</td></tr>"
-        "<tr><th>Driver</th><td>esp32-nut-hid</td></tr>"
+        "<tr><th>Driver</th><td>esp32-nut-hid v15.8</td></tr>"
         "<tr><th>Status</th><td id='td_status'><b>%s</b></td></tr>"
-        "<tr><th>Charge</th><td id='td_charge'>%s</td></tr>"
-        "<tr><th>Runtime</th><td>%s</td></tr>"
-        "<tr><th>Batt Voltage</th><td>%s</td></tr>"
-        "<tr><th>Input Voltage</th><td>%s</td></tr>"
-        "<tr><th>Output Voltage</th><td>%s</td></tr>"
-        "<tr><th>Load</th><td>%s</td></tr>"
+        "%s"
         "<tr><th>STA IP</th><td id='td_ip'>%s</td></tr>"
         "</table>"
         "<br><small id='td_poll'>Polling every 5s</small>"
         "<br><br><a href='/config'>[Configure]</a>"
         " &nbsp; <a href='/status'>[Status JSON]</a>"
+        " &nbsp; <a href='/compat'>[Compatible UPS List]</a>"
         "<script>"
+        /* addOrUpdate(id, label, value) — insert row before STA IP or update existing */
+        "function addOrUpdate(id,lbl,val){"
+          "var tr=document.getElementById(id);"
+          "if(!tr){"
+            "tr=document.createElement('tr');"
+            "tr.id=id;"
+            "tr.innerHTML='<th>'+lbl+'</th><td id=\'td_'+id+'\'></td>';"
+            "var ip=document.querySelector('#ups_tbl tr:last-child');"
+            "ip.parentNode.insertBefore(tr,ip);"
+          "}"
+          "var td=document.getElementById('td_'+id);"
+          "if(td)td.textContent=val;"
+        "}"
         "var t=setInterval(function(){"
           "var x=new XMLHttpRequest();"
           "x.open('GET','/status',true);"
@@ -299,8 +360,13 @@ static void render_dashboard(app_cfg_t *cfg, char *out, size_t outsz) {
               "try{"
                 "var d=JSON.parse(x.responseText);"
                 "document.getElementById('td_status').innerHTML='<b>'+d.ups_status+'</b>';"
-                "document.getElementById('td_charge').textContent=d.battery_charge+'%%';"
                 "document.getElementById('td_ip').textContent=d.sta_ip;"
+                "if(d.battery_charge!==null)addOrUpdate('tr_charge','Charge',d.battery_charge+'%%');"
+                "if(d.battery_runtime_s!==null)addOrUpdate('tr_runtime','Runtime',d.battery_runtime_s+' s');"
+                "if(d.battery_voltage_v!==null)addOrUpdate('tr_bvolt','Batt Voltage',d.battery_voltage_v.toFixed(3)+' V');"
+                "if(d.ups_load_pct!==null)addOrUpdate('tr_load','Load',d.ups_load_pct+'%%');"
+                "if(d.input_voltage_v!==null)addOrUpdate('tr_ivolt','Input Voltage',d.input_voltage_v.toFixed(1)+' V');"
+                "if(d.output_voltage_v!==null)addOrUpdate('tr_ovolt','Output Voltage',d.output_voltage_v.toFixed(1)+' V');"
                 "document.getElementById('td_poll').textContent='Updated: '+new Date().toLocaleTimeString();"
               "}catch(e){}"
             "}"
@@ -315,12 +381,203 @@ static void render_dashboard(app_cfg_t *cfg, char *out, size_t outsz) {
         "</body></html>",
         pw_warn,
         s_mfr, s_model,
-        st, s_charge, s_runtime,
-        s_bvolt, s_ivolt, s_ovolt, s_load,
+        st,
+        opt_rows,
         sta_ip[0] ? sta_ip : "not connected"
     );
 
     (void)cfg;
+}
+
+/* -------------------------------------------------------------------------
+ * Compatible UPS list   GET /compat
+ *
+ * Static page — source of truth is ups_device_db.c.
+ * Confirmed devices (tested and working) are marked with a green checkmark.
+ * All other entries are "reported compatible" based on NUT source / known
+ * HID UPS standards but have not been personally confirmed by the author.
+ * ---------------------------------------------------------------------- */
+static void render_compat(char *out, size_t outsz) {
+    snprintf(out, outsz,
+        "<!doctype html><html><head>"
+        "<meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>ESP32 UPS Node - Compatible UPS List</title>"
+        "<style>"
+        "body{font-family:sans-serif;margin:16px}"
+        "table{border-collapse:collapse;width:100%%}"
+        "th,td{border:1px solid #aaa;padding:6px 10px;text-align:left;font-size:0.92em}"
+        "th{background:#e8e8e8}"
+        ".confirmed{color:#186a00;font-weight:bold}"
+        ".unconfirmed{color:#555}"
+        ".note{font-size:0.85em;color:#444}"
+        "</style>"
+        "</head><body>"
+        "<h2>ESP32-S3 UPS Node v15.8 - Compatible UPS List</h2>"
+        "<p>Devices marked <span class='confirmed'>&#10003; Confirmed</span> have been personally tested "
+        "and verified working with this firmware.<br>"
+        "All other devices are expected to work based on NUT/HID UPS standards "
+        "but have not been independently confirmed by the project author.</p>"
+        "<p><b>Have a device that works? Open an issue or PR on "
+        "<a href='https://github.com/Driftah9/esp32-s3-nut-node'>GitHub</a> "
+        "to get it added to the confirmed list.</b></p>"
+        "<table>"
+        "<tr><th>Vendor</th><th>Models / Series</th><th>VID:PID</th>"
+        "<th>Decode Mode</th><th>Notes</th><th>Status</th></tr>"
+
+        /* ---- APC / Schneider ---- */
+        "<tr>"
+        "<td>APC / Schneider</td>"
+        "<td>Back-UPS XS 1500M</td>"
+        "<td>051D:0002</td>"
+        "<td>Direct (APC Back-UPS)</td>"
+        "<td class='note'>Charge, runtime, status via interrupt IN.<br>"
+        "Voltages via GET_REPORT (Feature polling).</td>"
+        "<td class='confirmed'>&#10003; Confirmed</td>"
+        "</tr>"
+
+        "<tr>"
+        "<td>APC / Schneider</td>"
+        "<td>Back-UPS BR1000G</td>"
+        "<td>051D:0002</td>"
+        "<td>Direct (APC Back-UPS)</td>"
+        "<td class='note'>Same VID:PID as XS 1500M. Same decode path confirmed working.</td>"
+        "<td class='confirmed'>&#10003; Confirmed</td>"
+        "</tr>"
+
+        "<tr>"
+        "<td>APC / Schneider</td>"
+        "<td>Smart-UPS / other models</td>"
+        "<td>051D:0000 (wildcard)</td>"
+        "<td>Standard HID</td>"
+        "<td class='note'>Standard HID descriptor path. Vendor page remap applied.</td>"
+        "<td class='unconfirmed'>&#9711; Unconfirmed</td>"
+        "</tr>"
+
+        /* ---- CyberPower ---- */
+        "<tr>"
+        "<td>CyberPower</td>"
+        "<td>SX550G, CP1200AVR, CP825AVR-G, CP1000AVRLCD, CP1500C,<br>"
+        "CP550HG, CP1000PFCLCD, CP850PFCLCD, CP1350PFCLCD,<br>"
+        "CP1500PFCLCD, CP1350AVRLCD, CP1500AVRLCD, CP900AVR,<br>"
+        "CPS685AVR, CPS800AVR, EC350G, EC750G, EC850LCD,<br>"
+        "BL1250U, AE550, CPJ500</td>"
+        "<td>0764:0501</td>"
+        "<td>Direct (CyberPower)</td>"
+        "<td class='note'>All live values via direct-decode bypass (rids 0x20-0x88).<br>"
+        "Descriptor declares insufficient Input fields; direct decode required.</td>"
+        "<td class='confirmed'>&#10003; Confirmed</td>"
+        "</tr>"
+
+        "<tr>"
+        "<td>CyberPower</td>"
+        "<td>OR2200LCDRM2U, OR700LCDRM1U, OR500LCDRM1U, OR1500ERM1U,<br>"
+        "CP1350EPFCLCD, CP1500EPFCLCD, PR1500RT2U, PR6000LCDRTXL5U,<br>"
+        "RT650EI, UT2200E, Value 1500ELCD-RU, VP1200ELCD</td>"
+        "<td>0764:0601</td>"
+        "<td>Direct (CyberPower)</td>"
+        "<td class='note'>Same direct-decode path as PID 0x0501. "
+        "Active power LogMax fix also applied.</td>"
+        "<td class='unconfirmed'>&#9711; Unconfirmed</td>"
+        "</tr>"
+
+        "<tr>"
+        "<td>CyberPower</td>"
+        "<td>900AVR, BC900D</td>"
+        "<td>0764:0005</td>"
+        "<td>Standard HID</td>"
+        "<td class='note'>Older model. Standard path with voltage LogMax fix.</td>"
+        "<td class='unconfirmed'>&#9711; Unconfirmed</td>"
+        "</tr>"
+
+        "<tr>"
+        "<td>CyberPower (other)</td>"
+        "<td>Any CyberPower not listed above</td>"
+        "<td>0764:xxxx</td>"
+        "<td>Standard HID</td>"
+        "<td class='note'>VID-only wildcard fallback. Standard path, voltage quirks applied.</td>"
+        "<td class='unconfirmed'>&#9711; Unconfirmed</td>"
+        "</tr>"
+
+        /* ---- Eaton / MGE ---- */
+        "<tr>"
+        "<td>Eaton / MGE / Powerware</td>"
+        "<td>3S, 5E, 5P, Ellipse, Evolution</td>"
+        "<td>0463:xxxx</td>"
+        "<td>Standard HID</td>"
+        "<td class='note'>Standard HID UPS descriptor. No known quirks.</td>"
+        "<td class='unconfirmed'>&#9711; Unconfirmed</td>"
+        "</tr>"
+
+        /* ---- Tripp Lite ---- */
+        "<tr>"
+        "<td>Tripp Lite</td>"
+        "<td>OMNI, SMART, INTERNETOFFICE series</td>"
+        "<td>09AE:xxxx</td>"
+        "<td>Standard HID + GET_REPORT</td>"
+        "<td class='note'>Standard HID path. Feature report polling active for values "
+        "only available via GET_REPORT.</td>"
+        "<td class='unconfirmed'>&#9711; Unconfirmed</td>"
+        "</tr>"
+
+        /* ---- Belkin ---- */
+        "<tr>"
+        "<td>Belkin</td>"
+        "<td>F6H, F6C series</td>"
+        "<td>050D:xxxx</td>"
+        "<td>Standard HID</td>"
+        "<td class='note'>Standard HID UPS descriptor. No known quirks.</td>"
+        "<td class='unconfirmed'>&#9711; Unconfirmed</td>"
+        "</tr>"
+
+        /* ---- Liebert ---- */
+        "<tr>"
+        "<td>Liebert / Vertiv</td>"
+        "<td>GXT4, PSI5</td>"
+        "<td>10AF:xxxx</td>"
+        "<td>Standard HID</td>"
+        "<td class='note'>Standard HID UPS descriptor. No known quirks.</td>"
+        "<td class='unconfirmed'>&#9711; Unconfirmed</td>"
+        "</tr>"
+
+        /* ---- Powercom ---- */
+        "<tr>"
+        "<td>Powercom</td>"
+        "<td>Black Knight, Dragon, King Pro</td>"
+        "<td>0D9F:xxxx</td>"
+        "<td>Standard HID</td>"
+        "<td class='note'>Standard HID UPS descriptor. No known quirks.</td>"
+        "<td class='unconfirmed'>&#9711; Unconfirmed</td>"
+        "</tr>"
+
+        /* ---- HP ---- */
+        "<tr>"
+        "<td>HP</td>"
+        "<td>T750 G2/G3, T1000 G2/G3, T1500 G2/G3, T3000 G2/G3</td>"
+        "<td>03F0:xxxx</td>"
+        "<td>Standard HID</td>"
+        "<td class='note'>Standard HID UPS descriptor. No known quirks.</td>"
+        "<td class='unconfirmed'>&#9711; Unconfirmed</td>"
+        "</tr>"
+
+        /* ---- Dell ---- */
+        "<tr>"
+        "<td>Dell</td>"
+        "<td>H750E, H950E, H1000E, H1750E</td>"
+        "<td>047C:xxxx</td>"
+        "<td>Standard HID</td>"
+        "<td class='note'>Standard HID UPS descriptor. No known quirks.</td>"
+        "<td class='unconfirmed'>&#9711; Unconfirmed</td>"
+        "</tr>"
+
+        "</table>"
+        "<br><p class='note'>VID:PID format: xxxx = any product ID (VID-only wildcard match).<br>"
+        "Decode modes: <b>Standard HID</b> = generic USB HID Power Device descriptor path. "
+        "<b>Direct</b> = vendor-specific byte-position decode (used when descriptor is incomplete).<br>"
+        "GET_REPORT = Feature report polling via USB control transfer for values not on interrupt IN.</p>"
+        "<br><a href='/'>[Back to Status]</a>"
+        "</body></html>"
+    );
 }
 
 /* -------------------------------------------------------------------------
@@ -349,7 +606,7 @@ static void render_config(app_cfg_t *cfg, char *out, size_t outsz,
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<title>ESP32 UPS Config</title>"
         "</head><body>"
-        "<h2>ESP32-S3 UPS Node v14.25 - Config</h2>"
+        "<h2>ESP32-S3 UPS Node v15.8 - Config</h2>"
         "%s%s"
         "<form method='POST' action='/save'>"
         "<table border='0' cellpadding='4'>"
@@ -486,8 +743,8 @@ static void handle_http_client(app_cfg_t *cfg, int fd) {
         if (content_len >= 0 && (int)strlen(body) > content_len) body[content_len] = 0;
     }
 
-    /* Auth: /status always open */
-    bool needs_auth = (strcmp(path, "/status") != 0);
+    /* Auth: /status and /compat always open (public endpoints) */
+    bool needs_auth = (strcmp(path, "/status") != 0) && (strcmp(path, "/compat") != 0);
     if (needs_auth && !check_auth(cfg, headers, hdr_end)) {
         http_send_auth_required(fd);
         free(rx); socket_close_graceful(fd); return;
@@ -500,6 +757,12 @@ static void handle_http_client(app_cfg_t *cfg, int fd) {
         if (page) { render_dashboard(cfg, page, HTTP_PAGE_BUF); http_send_html(fd, page); free(page); }
         else       { http_send(fd, "500 Internal Server Error", "text/plain", "OOM"); }
 
+    } else if (strcmp(path, "/compat") == 0 && strcasecmp(method, "GET") == 0) {
+        /* Compatible UPS list — needs a larger buffer due to table size */
+        char *page = (char *)malloc(8192);
+        if (page) { render_compat(page, 8192); http_send_html(fd, page); free(page); }
+        else       { http_send(fd, "500 Internal Server Error", "text/plain", "OOM"); }
+
     } else if ((strcmp(path, "/config") == 0 || strcmp(path, "/config/") == 0)
                && strcasecmp(method, "GET") == 0) {
         char *page = (char *)malloc(HTTP_PAGE_BUF);
@@ -507,22 +770,65 @@ static void handle_http_client(app_cfg_t *cfg, int fd) {
         else       { http_send(fd, "500 Internal Server Error", "text/plain", "OOM"); }
 
     } else if (strcmp(path, "/status") == 0 && strcasecmp(method, "GET") == 0) {
+        /* Full live JSON — all fields consumed by AJAX poller on dashboard.
+         * Numeric fields use JSON null when not valid/available. */
         char sta_ip[16];
         wifi_mgr_sta_ip_str(sta_ip);
         ups_state_t ups;
         ups_state_snapshot(&ups);
-        char json[512];
+
+        char json[640];
+        char bvolt_s[20], load_s[12], runtime_s[12], ivolt_s[20], ovolt_s[20];
+
+        /* Format nullable floats/ints as JSON null or value */
+        if (ups.battery_voltage_valid)
+            snprintf(bvolt_s,   sizeof(bvolt_s),   "%.3f", ups.battery_voltage_mv / 1000.0f);
+        else strlcpy0(bvolt_s, "null", sizeof(bvolt_s));
+
+        if (ups.ups_load_valid)
+            snprintf(load_s,    sizeof(load_s),     "%u",   ups.ups_load_pct);
+        else strlcpy0(load_s,  "null", sizeof(load_s));
+
+        if (ups.battery_runtime_valid)
+            snprintf(runtime_s, sizeof(runtime_s),  "%lu",  (unsigned long)ups.battery_runtime_s);
+        else strlcpy0(runtime_s, "null", sizeof(runtime_s));
+
+        if (ups.input_voltage_valid)
+            snprintf(ivolt_s, sizeof(ivolt_s), "%.3f", ups.input_voltage_mv  / 1000.0f);
+        else strlcpy0(ivolt_s, "null", sizeof(ivolt_s));
+
+        if (ups.output_voltage_valid)
+            snprintf(ovolt_s, sizeof(ovolt_s), "%.3f", ups.output_voltage_mv / 1000.0f);
+        else strlcpy0(ovolt_s, "null", sizeof(ovolt_s));
+
         snprintf(json, sizeof(json),
-            "{\"ap_ssid\":\"%s\",\"sta_ssid\":\"%s\",\"sta_ip\":\"%s\","
-            "\"ups_name\":\"%s\",\"nut_port\":3493,"
-            "\"ups_status\":\"%s\",\"battery_charge\":%u,"
-            "\"ups_valid\":%s,\"ap_active\":%s}",
-            cfg->ap_ssid, cfg->sta_ssid, sta_ip,
+            "{"
+            "\"ap_ssid\":\"%s\","
+            "\"sta_ssid\":\"%s\","
+            "\"sta_ip\":\"%s\","
+            "\"ups_name\":\"%s\","
+            "\"nut_port\":3493,"
+            "\"ups_status\":\"%s\","
+            "\"battery_charge\":%u,"
+            "\"battery_runtime_s\":%s,"
+            "\"battery_voltage_v\":%s,"
+            "\"ups_load_pct\":%s,"
+            "\"input_voltage_v\":%s,"
+            "\"output_voltage_v\":%s,"
+            "\"ups_valid\":%s,"
+            "\"ap_active\":%s"
+            "}",
+            cfg->ap_ssid,
+            cfg->sta_ssid,
+            sta_ip,
             cfg->ups_name,
             ups.ups_status[0] ? ups.ups_status : "UNKNOWN",
             ups.battery_charge,
+            runtime_s, bvolt_s, load_s,
+            ivolt_s, ovolt_s,
             ups.valid               ? "true" : "false",
             wifi_mgr_ap_is_active() ? "true" : "false");
+
         http_send_json(fd, json);
 
     } else if (strcmp(path, "/save") == 0

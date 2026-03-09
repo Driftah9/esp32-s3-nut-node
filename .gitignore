@@ -20,3 +20,6 @@ main/.project
 # OS
 Thumbs.db
 .DS_Store
+
+# Local push script (not part of firmware)
+git-push.ps1

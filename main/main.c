@@ -2,8 +2,8 @@
  ESP32-S3 UPS NUT Node
  CORE ORCHESTRATOR
 
- VERSION: v14.25
- DATE: 2026-03-07
+ VERSION: v15.7
+ DATE: 2026-03-09
  ESP-IDF: v5.3.1
 
  REVERT HISTORY
@@ -15,6 +15,14 @@
  R5  v14.25 SoftAP lifecycle: disable on STA connect, re-enable after
             60s STA dropout. Portal redesign + Basic Auth password
             protection via cfg->portal_pass (empty = open, first boot).
+ R6  v15.3  Version bump to match HID parser/descriptor versions.
+            CyberPower direct-decode bypass now fully operational.
+ R7  v15.6  APC runtime from rid=0C bytes 1-2. BR1000G confirmed.
+            cache scan: uid=0x73 RunTimeToEmpty, uid=0x67 RelativeSOC.
+ R8  v15.7  Remove input/output voltage everywhere.
+            Dynamic portal dashboard: static Mfr/Model/Driver/Status rows,
+            optional rows (Charge/Runtime/Batt V/Load) only when valid.
+            AJAX addOrUpdate() inserts new rows dynamically on discovery.
 
 ============================================================================*/
 
@@ -28,14 +36,14 @@
 #include "ups_state.h"
 #include "ups_usb_hid.h"
 
-static const char *TAG = "UPS_USB_M14";
+static const char *TAG = "UPS_USB_M15";
 
 static app_cfg_t g_cfg;
 static ups_state_t g_ups;
 
 void app_main(void) {
     ESP_LOGI(TAG, "=======================================");
-    ESP_LOGI(TAG, "ESP32 UPS NUT Node - v14.25");
+    ESP_LOGI(TAG, "ESP32 UPS NUT Node - v15.8");
     ESP_LOGI(TAG, "ESP-IDF v5.3.1 target");
     ESP_LOGI(TAG, "=======================================");
 

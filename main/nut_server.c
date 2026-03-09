@@ -26,6 +26,14 @@
             - ups.vendorid / ups.productid  (from USB identity)
             compound ups.status now produced by ups_hid_parser:
             "OL", "OL CHRG", "OL LB", "OB DISCHRG", "OB DISCHRG LB"
+ R11 v15.3  driver.version bumped to 15.3 to match firmware version.
+ R12 v15.7  Remove input.voltage and output.voltage NUT variables.
+ R13 v15.8  Re-add input.voltage and output.voltage — populated by GET_REPORT.
+            Add F9 static NUT diagnostic vars:
+              battery.type      (static: "PbAc")
+              battery.charge.low already existed
+              device.type       (static: "ups")
+            DRIVER_VERSION bumped to 15.8.
 
 ============================================================================*/
 
@@ -45,7 +53,8 @@
 
 static const char *TAG = "nut_server";
 static const char *DRIVER_NAME    = "esp32-nut-hid";
-static const char *DRIVER_VERSION = "14.24";
+static const char *DRIVER_VERSION = "15.8";
+static const char *DEVICE_TYPE    = "ups";              /* standard NUT device.type value */
 static const char *BATTERY_TYPE   = "PbAc";          /* sealed lead-acid — all APC Back-UPS */
 static const char *UPS_TYPE       = "line-interactive"; /* all Back-UPS series */
 
@@ -123,12 +132,12 @@ static void emit_var_list(int fd, const char *ups, const ups_state_t *st)
         nut_sendf(fd, "VAR %s output.voltage \"%.1f\"\n", ups,
                   (double)st->output_voltage_mv / 1000.0);
     }
-
     /* --- UPS status and metrics --- */
     nut_sendf(fd, "VAR %s ups.status \"%s\"\n",  ups,
               st->ups_status[0] ? st->ups_status : "UNKNOWN");
     nut_sendf(fd, "VAR %s ups.flags \"0x%08X\"\n", ups, (unsigned)st->ups_flags);
     nut_sendf(fd, "VAR %s ups.type \"%s\"\n",    ups, UPS_TYPE);
+    nut_sendf(fd, "VAR %s device.type \"%s\"\n", ups, DEVICE_TYPE);
     if (st->ups_firmware[0]) {
         nut_sendf(fd, "VAR %s ups.firmware \"%s\"\n", ups, st->ups_firmware);
     }
@@ -251,6 +260,8 @@ static void nut_handle_line(app_cfg_t *cfg, int fd, nut_session_t *sess, char *l
             nut_sendf(fd, "VAR %s %s \"0x%08X\"\n", ups, var, (unsigned)st.ups_flags);
         else if (strcmp(var, "ups.type") == 0)
             nut_sendf(fd, "VAR %s %s \"%s\"\n", ups, var, UPS_TYPE);
+        else if (strcmp(var, "device.type") == 0)
+            nut_sendf(fd, "VAR %s %s \"%s\"\n", ups, var, DEVICE_TYPE);
         else if (strcmp(var, "ups.firmware") == 0 && st.ups_firmware[0])
             nut_sendf(fd, "VAR %s %s \"%s\"\n", ups, var, st.ups_firmware);
         else if (strcmp(var, "ups.load") == 0 && st.ups_load_valid)
