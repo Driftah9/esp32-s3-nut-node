@@ -1,0 +1,35 @@
+# ── Local working folders ─────────────────────────────────────────────────────
+# These are local project management folders, not public repo content
+archive/
+backups/
+
+# ── Local Claude / session files ─────────────────────────────────────────────
+CLAUDE.md
+PROJECT.md
+BUILD-IGNORE.md
+build_run.bat
+.claude/
+
+# ── ESP-IDF build artifacts ───────────────────────────────────────────────────
+src/current/build/
+src/current/sdkconfig.old
+src/current/managed_components/
+src/current/dependencies.lock
+src/current/.vscode/
+src/current/.ccls-cache/
+src/current/.cproject
+src/current/.project
+src/current/main/.cproject
+src/current/main/.project
+src/current/hid_debug.log
+
+# ── IDE / editor ──────────────────────────────────────────────────────────────
+.vscode/
+.ccls-cache/
+*.swp
+*.swo
+*~
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+Thumbs.db
+.DS_Store

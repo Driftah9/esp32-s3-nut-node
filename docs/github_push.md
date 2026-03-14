@@ -22,6 +22,7 @@ main
 v15.9
 
 ## Commit Message
+- Add root .gitignore - exclude archive/, backups/, CLAUDE.md, PROJECT.md, build artifacts
+- Remove archive/ and backups/ from repo tracking (local working folders only)
 - Fix label-new-issue.yml - YAML syntax error from backtick template literals
 - Fix update-compat-list.yml - YAML syntax error from backtick template literals
-- Rewrite JS in both workflows using string concatenation instead of template literals
