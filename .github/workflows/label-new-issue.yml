@@ -16,25 +16,28 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
+            const body = [
+              "## Compatibility Report Received - Pending Validation",
+              "",
+              "Thanks for submitting! This report has been queued for review.",
+              "",
+              "**Maintainer validation checklist:**",
+              "- [ ] Serial log shows USB device connected with correct VID:PID",
+              "- [ ] Serial log shows HID descriptor parsed successfully (no fatal errors)",
+              "- [ ] Serial log shows NUT server started and UPS marked online",
+              "- [ ] Reported metrics match what the serial log shows",
+              "- [ ] VID:PID confirmed against submission",
+              "",
+              "**To confirm:** Add the `confirmed` label to this issue.",
+              "**To reject:** Add the `not-supported` label and close the issue.",
+              "",
+              "> *This comment was posted automatically. Validation is done manually by the maintainer.*"
+            ].join("\n");
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: `## 🔍 Compatibility Report Received — Pending Validation
-
-Thanks for submitting! This report has been queued for review.
-
-**Maintainer validation checklist:**
-- [ ] Serial log shows USB device connected with correct VID:PID
-- [ ] Serial log shows HID descriptor parsed successfully (no fatal errors)
-- [ ] Serial log shows NUT server started and UPS marked online
-- [ ] Reported metrics match what the serial log shows
-- [ ] VID:PID confirmed against submission
-
-**To confirm:** Add the \`confirmed\` label to this issue.  
-**To reject:** Add the \`not-supported\` label and close the issue.
-
-> *This comment was posted automatically. Validation is done manually by the maintainer.*`
+              body: body
             });
 
   label-new-issue:

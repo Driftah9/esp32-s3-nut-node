@@ -27,84 +27,64 @@ jobs:
             const issue = context.payload.issue;
             const body = issue.body || '';
 
-            // ── Parse structured issue fields ──────────────────────────────
-            function extractField(body, fieldId) {
-              // GitHub issue forms render as:
-              // ### Field Label\n\nValue\n\n
-              const patterns = [
-                new RegExp(`### UPS Manufacturer\\s*\\n+([^\\n#]+)`, 'i'),
-                new RegExp(`### UPS Model\\s*\\n+([^\\n#]+)`, 'i'),
-                new RegExp(`### USB VID:PID\\s*\\n+([^\\n#]+)`, 'i'),
-                new RegExp(`### Firmware Version\\s*\\n+([^\\n#]+)`, 'i'),
-                new RegExp(`### Does UPS status data appear[^\\n]*\\n+([^\\n#]+)`, 'i'),
-              ];
-              const labels = {
-                manufacturer: patterns[0],
-                model: patterns[1],
-                vid_pid: patterns[2],
-                firmware: patterns[3],
-                status_reads: patterns[4],
-              };
-              const match = (labels[fieldId] || new RegExp(`_No response_`)).exec(body);
+            function extractField(body, label) {
+              const re = new RegExp('### ' + label + '\\s*\\n+([^\\n#]+)', 'i');
+              const match = re.exec(body);
               return match ? match[1].trim() : '_unknown_';
             }
 
-            const manufacturer = extractField(body, 'manufacturer');
-            const model        = extractField(body, 'model');
-            const vid_pid      = extractField(body, 'vid_pid');
-            const firmware     = extractField(body, 'firmware');
-            const statusReads  = extractField(body, 'status_reads');
+            const manufacturer = extractField(body, 'UPS Manufacturer');
+            const model        = extractField(body, 'UPS Model');
+            const vid_pid      = extractField(body, 'USB VID:PID');
+            const firmware     = extractField(body, 'Firmware Version');
+            const statusReads  = extractField(body, 'Does UPS status data appear');
 
             const issueNum  = issue.number;
             const issueUrl  = issue.html_url;
             const submitter = issue.user.login;
             const date      = new Date().toISOString().split('T')[0];
+            const status    = statusReads.startsWith('Yes') ? 'Confirmed' : 'Partial';
 
-            // ── Build table row ────────────────────────────────────────────
-            const newRow = `| ${manufacturer} ${model} | ${vid_pid} | ${firmware} | ${statusReads.startsWith('Yes') ? '✅ Confirmed' : '⚠️ Partial'} | @${submitter} | [#${issueNum}](${issueUrl}) | ${date} |`;
+            const newRow = '| ' + manufacturer + ' ' + model + ' | ' + vid_pid + ' | ' + firmware + ' | ' + status + ' | @' + submitter + ' | [#' + issueNum + '](' + issueUrl + ') | ' + date + ' |';
 
-            // ── Read and update confirmed-ups.md ───────────────────────────
             const filePath = 'docs/confirmed-ups.md';
             let content = fs.readFileSync(filePath, 'utf8');
 
-            // Insert before the "## Expected" section or at end of confirmed table
-            const insertMarker = '\n## ⚠️ Expected';
+            const insertMarker = '\n## Expected';
             const tableHeader  = '| Device | VID:PID | Firmware | Status | Submitted by | Issue | Date |';
 
             if (content.includes(tableHeader)) {
-              // Table exists — append row before the next section
-              content = content.replace(insertMarker, `\n${newRow}${insertMarker}`);
+              content = content.replace(insertMarker, '\n' + newRow + insertMarker);
             } else {
-              // Table doesn't exist yet — add header + row
-              const tableSection = `\n${tableHeader}\n|--------|---------|----------|--------|--------------|-------|------|\n${newRow}\n`;
-              content = content.replace(insertMarker, `${tableSection}${insertMarker}`);
+              const tableSection = '\n' + tableHeader + '\n|--------|---------|----------|--------|--------------|-------|------|\n' + newRow + '\n';
+              content = content.replace(insertMarker, tableSection + insertMarker);
             }
 
             fs.writeFileSync(filePath, content);
-            console.log(`Added: ${manufacturer} ${model} (${vid_pid})`);
+            console.log('Added: ' + manufacturer + ' ' + model + ' (' + vid_pid + ')');
 
       - name: Commit updated confirmed-ups.md
         run: |
-          git config user.name  "github-actions[bot]"
+          git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add docs/confirmed-ups.md
-          git diff --cached --quiet || git commit -m "compat: add confirmed device from issue #${{ github.event.issue.number }}
-
-          $(echo '${{ github.event.issue.title }}' | head -c 72)
-          Auto-committed by update-compat-list workflow."
+          git diff --cached --quiet || git commit -m "compat: add confirmed device from issue #${{ github.event.issue.number }}"
           git push
 
       - name: Post confirmation comment on issue
         uses: actions/github-script@v7
         with:
           script: |
+            const body = [
+              "## Added to Confirmed List",
+              "",
+              "This device has been added to `docs/confirmed-ups.md`.",
+              "",
+              "Thank you for contributing to the compatibility list!"
+            ].join("\n");
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: `## ✅ Added to Confirmed List
-
-This device has been added to [\`docs/confirmed-ups.md\`](../blob/main/docs/confirmed-ups.md).
-
-Thank you for contributing to the compatibility list! 🎉`
+              body: body
             });
