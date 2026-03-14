@@ -1,0 +1,156 @@
+name: "UPS Compatibility Report"
+description: "Report a UPS that works (or doesn't) with this firmware. Confirmed submissions get added to the compatibility list."
+title: "[COMPAT] <Manufacturer> <Model> — <VID:PID>"
+labels:
+  - compatibility-report
+  - needs-validation
+assignees:
+  - Driftah9
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## UPS Compatibility Report
+        Thanks for taking the time to submit this — it helps everyone know what works.
+        
+        **Before submitting:** Make sure the UPS is connected via USB and the ESP32 has fully booted.
+        The serial log and portal `/status` JSON are the most useful pieces of information.
+
+  - type: input
+    id: ups_manufacturer
+    attributes:
+      label: "UPS Manufacturer"
+      description: "Brand name (e.g. APC, CyberPower, Eaton, Tripp Lite)"
+      placeholder: "APC"
+    validations:
+      required: true
+
+  - type: input
+    id: ups_model
+    attributes:
+      label: "UPS Model"
+      description: "Full model name as printed on the unit"
+      placeholder: "Back-UPS XS 1500M"
+    validations:
+      required: true
+
+  - type: input
+    id: vid_pid
+    attributes:
+      label: "USB VID:PID"
+      description: "Shown in the web portal dashboard or serial boot log as `VID:PID=XXXX:XXXX`. Format: XXXX:XXXX (uppercase hex)"
+      placeholder: "051D:0002"
+    validations:
+      required: true
+
+  - type: input
+    id: firmware_version
+    attributes:
+      label: "Firmware Version"
+      description: "Shown in the portal subtitle (e.g. v15.9) or serial boot banner (`App version:`)"
+      placeholder: "v15.9"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: ups_powers_device
+    attributes:
+      label: "Does the UPS power the ESP32 correctly?"
+      description: "Confirm the ESP32 boots and stays running while connected to this UPS"
+      options:
+        - "Yes — ESP32 boots and runs normally"
+        - "No — ESP32 does not boot or resets"
+        - "Not tested / powered separately"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: status_reads
+    attributes:
+      label: "Does UPS status data appear in the portal?"
+      description: "Check the dashboard at http://<device-ip> — does it show charge %, runtime, status?"
+      options:
+        - "Yes — charge, runtime, and status all show correctly"
+        - "Partial — some values show, some are missing"
+        - "No — dashboard shows no UPS data"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: metrics_confirmed
+    attributes:
+      label: "Which metrics are reporting correctly?"
+      description: "Check all that show a valid value in the portal dashboard"
+      options:
+        - label: "ups.status (e.g. OL, OB, CHRG)"
+        - label: "battery.charge (%)"
+        - label: "battery.runtime (seconds)"
+        - label: "battery.voltage (V)"
+        - label: "input.voltage (V)"
+        - label: "output.voltage (V)"
+        - label: "ups.load (%)"
+
+  - type: dropdown
+    id: nut_client_works
+    attributes:
+      label: "Does a NUT client connect successfully on port 3493?"
+      description: "If you tested with upsc, Home Assistant, or another NUT client"
+      options:
+        - "Yes — NUT client connects and reads data"
+        - "No — NUT client cannot connect"
+        - "Not tested"
+    validations:
+      required: true
+
+  - type: textarea
+    id: serial_log
+    attributes:
+      label: "Serial Log (first 200 lines)"
+      description: |
+        Paste the first 200 lines of serial output from a fresh boot with the UPS connected.
+        This is the most important field — it shows USB enumeration, HID parsing, and NUT startup.
+        Capture with: `idf.py monitor -p COM3` or any serial terminal at 115200 baud.
+      placeholder: |
+        I (0) boot: ESP-IDF v5.3.1
+        I (xxx) app_start: Starting app...
+        ...
+        I (xxx) usb_host: USB device connected VID:PID=051D:0002
+        ...
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: status_json
+    attributes:
+      label: "Status JSON (optional but helpful)"
+      description: |
+        Paste the output of http://<device-ip>/status
+        This confirms the exact values the firmware is reporting.
+      placeholder: |
+        {"ups_status":"OL","battery_charge":100,"battery_runtime_s":1800,...}
+      render: json
+    validations:
+      required: false
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: "Additional Notes"
+      description: "Anything unusual — quirks, partial data, workarounds, physical setup details"
+      placeholder: "Battery voltage always shows 0.000 V — this is normal for APC consumer models."
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: "Submission Checklist"
+      options:
+        - label: "I have included the first 200 lines of serial log from a fresh boot"
+          required: true
+        - label: "The UPS was connected via USB when the ESP32 booted"
+          required: true
+        - label: "I have confirmed the VID:PID from the portal or serial log"
+          required: true

@@ -1,0 +1,91 @@
+name: "Bug Report"
+description: "Something isn't working correctly with the firmware, portal, or NUT server."
+title: "[BUG] <short description>"
+labels:
+  - bug
+assignees:
+  - Driftah9
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Bug Report
+        Please fill out as much as possible. The serial log is the most useful thing you can provide.
+
+  - type: input
+    id: firmware_version
+    attributes:
+      label: "Firmware Version"
+      description: "Shown in the portal subtitle or serial boot banner"
+      placeholder: "v15.9"
+    validations:
+      required: true
+
+  - type: input
+    id: board
+    attributes:
+      label: "ESP32-S3 Board"
+      description: "Board model and flash/PSRAM config if known"
+      placeholder: "Hosyond ESP32-S3-WROOM-1 N16R8 (16MB/8MB)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: bug_description
+    attributes:
+      label: "What is happening?"
+      description: "Describe the bug clearly. What did you expect, and what actually happens?"
+      placeholder: "The dashboard shows 'UNKNOWN' for UPS status even though the UPS is connected and powered on."
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: "Steps to Reproduce"
+      placeholder: |
+        1. Connect UPS via USB
+        2. Boot ESP32
+        3. Open portal at http://10.0.0.190
+        4. Dashboard shows UNKNOWN status
+    validations:
+      required: true
+
+  - type: dropdown
+    id: ups_connected
+    attributes:
+      label: "Is a UPS connected when this happens?"
+      options:
+        - "Yes — UPS connected via USB"
+        - "No — no UPS connected"
+        - "Not relevant to this bug"
+    validations:
+      required: true
+
+  - type: input
+    id: ups_model
+    attributes:
+      label: "UPS Model and VID:PID (if relevant)"
+      placeholder: "APC Back-UPS XS 1500M — 051D:0002"
+    validations:
+      required: false
+
+  - type: textarea
+    id: serial_log
+    attributes:
+      label: "Serial Log"
+      description: |
+        Paste the first 200 lines from a fresh boot, or the relevant section showing the error.
+        Capture with: `idf.py monitor -p COM3` or any serial terminal at 115200 baud.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: "Additional Context"
+      description: "Screenshots, portal output, NUT client errors, anything else relevant"
+    validations:
+      required: false
