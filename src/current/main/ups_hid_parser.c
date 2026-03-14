@@ -297,11 +297,23 @@ static bool decode_cyberpower_direct(uint8_t rid,
          * Retained as a no-op case to suppress default: log spam. */
         break;
     case 0x80:
+        /*
+         * rid=0x80 ac_present — on CP550HG this stays 0x01 even on battery.
+         * Only trust it when it says AC is ABSENT (0x00) — that's definitive.
+         * When ac_present=1 we ignore it: rid=0x29 is the authoritative
+         * source for on-battery state and must not be overwritten.
+         */
         if (plen >= 1) {
-            upd->input_utility_present_valid = true;
-            upd->input_utility_present       = (p[0] & 0x01u) != 0u;
-            changed = true;
-            ESP_LOGI(TAG, "[CP] ac_present=%u", (unsigned)(p[0] & 1));
+            bool ac = (p[0] & 0x01u) != 0u;
+            if (!ac) {
+                /* AC definitely lost — trust this */
+                upd->input_utility_present_valid = true;
+                upd->input_utility_present       = false;
+                changed = true;
+            }
+            /* ac=1: do not set — rid=0x29 owns this decision */
+            ESP_LOGI(TAG, "[CP] ac_present=%u%s", (unsigned)ac,
+                     ac ? " (ignored, rid=0x29 authoritative)" : " -> AC LOST");
         }
         break;
     case 0x82:
@@ -339,9 +351,35 @@ static bool decode_cyberpower_direct(uint8_t rid,
             ESP_LOGI(TAG, "[CP] flags_byte=0x%02X", p[0]);
         }
         break;
+    case 0x29:
+        /*
+         * CyberPower battery/AC status byte.
+         * Observed values:
+         *   0x00 = on-line (AC present, not discharging)
+         *   0x03 = on-battery (discharging — AC lost)
+         * This is more reliable than rid=0x80 (ac_present) which
+         * stays 0x01 even during discharge on CP550HG.
+         * bit0 = discharging, bit1 = low-battery (observed)
+         */
+        if (plen >= 1) {
+            upd->input_utility_present_valid = true;
+            upd->input_utility_present       = (p[0] == 0x00u);
+            /*
+             * 0x03 = on-battery normal discharge (bit0=on-batt, bit1=discharging)
+             * 0x02 = low battery observed on other CyberPower models
+             * bit1 alone does NOT mean low battery on CP550HG — it
+             * appears set whenever discharging. Only flag LB if
+             * rid=0x85 or a dedicated low-batt bit indicates it.
+             * Leave ups_flags alone here; rid=0x85 handles LB.
+             */
+            changed = true;
+            ESP_LOGI(TAG, "[CP] status_byte=0x%02X -> %s",
+                     p[0], (p[0] == 0x00u) ? "OL" : "OB");
+        }
+        break;
     /* Unresolved reports — silently ignore */
     case 0x21: case 0x22: case 0x25: case 0x28:
-    case 0x29: case 0x86: case 0x87:
+    case 0x86: case 0x87:
         break;
     default:
         break;
@@ -400,7 +438,7 @@ static bool decode_apc_backups_direct(uint8_t rid,
         if (plen >= 3) {
             uint16_t runtime_s = (uint16_t)(p[1] | ((uint16_t)p[2] << 8));
             /* Sanity: 0 = unknown/not-calculated, cap at ~24h */
-            if (runtime_s != 0 && runtime_s < 90000u) {
+            if (runtime_s != 0) {  /* uint16_t max 65535s — no upper cap needed */
                 upd->battery_runtime_valid = true;
                 upd->battery_runtime_s     = runtime_s;
                 changed = true;
@@ -478,6 +516,8 @@ static void derive_status(ups_state_update_t *upd)
         else               strlcpy(buf, "OL",       sizeof(buf));
     }
     strlcpy(upd->ups_status, buf, sizeof(upd->ups_status));
+    ESP_LOGI(TAG, "derive_status -> '%s' (on_battery=%d utility_known=%d charging=%d)",
+             buf, (int)on_battery, (int)utility_known, (int)charging);
 }
 
 /* ---- Main decode entry point ----------------------------------------- */

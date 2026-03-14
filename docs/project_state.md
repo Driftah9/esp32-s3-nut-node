@@ -1,15 +1,8 @@
-# Project State — [Project Name]
-
-> This file is the shared memory bridge between Claude Desktop and Claude CLI.
-> CLI updates this after every command run.
-> Desktop reads this at the start of every session to restore full context.
-> Last write wins — always overwrite, never append old entries.
-
----
+# Project State — esp32-s3-nut-node
 
 ## Last Updated
-Date:
-Updated by: [Desktop / CLI]
+Date: 2026-03-14 (Session 15 — final)
+Updated by: Desktop
 
 ---
 
@@ -17,31 +10,31 @@ Updated by: [Desktop / CLI]
 
 | Field | Value |
 |-------|-------|
-| Project Version | |
-| Overall Status | [e.g. 🟢 Working / 🟡 In Progress / 🔴 Broken] |
-| Last Action | |
-| Last Action Result | [Success / Failed / Partial] |
+| Project Version | v15.10 |
+| Overall Status | 🟢 Working |
+| Last Action | AJAX auto-refresh fixed — OL/OB updates without F5 |
+| Last Action Result | Success |
 
 ---
 
 ## Last CLI Run
 
 ### Command
-```
-[command that was run]
+```powershell
+idf.py build flash -p COM3 monitor
 ```
 
 ### Result
-```
-[output summary — errors, warnings, key lines]
-```
+- v15.10 confirmed in portal
+- AJAX auto-refresh working — OL→OB in ~10s without manual refresh
+- Poll clock showing correctly ("5s ago" → "Just updated")
+- Both CyberPower and APC OL/OB transitions confirmed
 
 ### Outcome
-- [ ] Build passed
-- [ ] Flash successful
-- [ ] Monitor captured
-- [ ] Tests passed
-- [ ] Deploy successful
+- [x] Build passed
+- [x] Flash successful
+- [x] AJAX auto-refresh working
+- [ ] GitHub push — pending (run .\git-push.ps1)
 
 ---
 
@@ -49,25 +42,15 @@ Updated by: [Desktop / CLI]
 
 | Issue | Severity | Status |
 |-------|----------|--------|
-| | | |
+| USB boot-with-device-plugged crash (hub.c:837 assert) | Low | Known/accepted — boot first then plug in |
+| App version string shows v15.9-5-ga0f6ea4-dirty | Low | Cosmetic — fix with git tag v15.10 |
 
 ---
 
 ## Next Recommended Step
 
-```
-[exact next action — specific enough for a cold-start session to proceed immediately]
-```
-
----
-
-## Monitor Log Summary
-*(ESP32 projects only — updated after each timed monitor run)*
-
-Last monitor duration: [X seconds]
-Log file: `docs\monitor.log`
-
-Key observations:
--
-
-Recommended next duration: [X seconds]
+1. GitHub push: `.\git-push.ps1` from project root
+2. AP password: http://10.0.0.190/config → AP Password (8+ chars)
+3. Z2M TCP keepalive: TubeZB coordinator web UI, 30-60s
+4. Linux NUT hub (M9): static IP for linuxtest LXC
+5. git tag v15.10 to clean up version string

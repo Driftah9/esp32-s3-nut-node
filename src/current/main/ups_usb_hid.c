@@ -31,6 +31,11 @@
             while waiting for the transfer callback instead of blocking with
             xTaskNotifyWait().  The USB host event loop must be serviced
             for the control transfer completion callback to fire.
+ R11 v15.10 DB-driven identity cleanup in load_usb_strings():
+            - Replace abbreviated USB mfr strings (CPS→CyberPower) with
+              DB vendor_name for all known devices.
+            - Fall back to DB model_hint when USB product string contains
+              '?' garbage chars (CyberPower CP550HG returns 'ST Series??').
 
 ============================================================================*/
 
@@ -260,6 +265,36 @@ static void load_usb_strings(usb_device_handle_t dev)
 
     ESP_LOGI(TAG, "USB strings: mfr='%s' product='%s' serial='%s'",
              s_mfr, s_product, s_serial);
+
+    /* ---- DB-driven identity cleanup ----
+     * 1. Replace abbreviated USB manufacturer strings (e.g. "CPS") with
+     *    the full vendor_name from the device DB entry.
+     * 2. If the USB product string contains '?' (garbage/non-ASCII chars
+     *    from CyberPower and others), fall back to the DB model_hint.
+     */
+    {
+        const ups_device_entry_t *entry = ups_device_db_lookup(s_vid, s_pid);
+        if (entry && entry->vendor_name && entry->vid != 0) {
+            /* Always prefer DB vendor name over raw USB string —
+             * USB mfr strings are often abbreviated (CPS, APC, etc.) */
+            strlcpy(s_mfr, entry->vendor_name, sizeof(s_mfr));
+        }
+        if (entry && entry->model_hint) {
+            /* Check if product string has garbage: contains '?' or
+             * is just whitespace/UNKNOWN */
+            bool product_garbled = false;
+            for (size_t i = 0; s_product[i]; i++) {
+                if (s_product[i] == '?') { product_garbled = true; break; }
+            }
+            if (product_garbled ||
+                strcmp(s_product, "UNKNOWN") == 0 ||
+                s_product[0] == 0) {
+                strlcpy(s_product, entry->model_hint, sizeof(s_product));
+                ESP_LOGI(TAG, "Product string overridden from DB: '%s'", s_product);
+            }
+        }
+    }
+
     publish_identity();
 }
 

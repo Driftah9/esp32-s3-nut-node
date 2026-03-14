@@ -2,8 +2,8 @@
  ESP32-S3 UPS NUT Node
  CORE ORCHESTRATOR
 
- VERSION: v15.7
- DATE: 2026-03-09
+ VERSION: v15.10
+ DATE: 2026-03-14
  ESP-IDF: v5.3.1
 
  REVERT HISTORY
@@ -23,6 +23,10 @@
             Dynamic portal dashboard: static Mfr/Model/Driver/Status rows,
             optional rows (Charge/Runtime/Batt V/Load) only when valid.
             AJAX addOrUpdate() inserts new rows dynamically on discovery.
+ R9  v15.9  /compat page hierarchy expand/collapse, runtime display Xm Ys.
+ R10 v15.10 DB-driven identity: mfr/model overrides from ups_device_db.
+            derive_status debug log. CPS→CyberPower, garbled product
+            string fallback to model_hint.
 
 ============================================================================*/
 
@@ -43,7 +47,7 @@ static ups_state_t g_ups;
 
 void app_main(void) {
     ESP_LOGI(TAG, "=======================================");
-    ESP_LOGI(TAG, "ESP32 UPS NUT Node - v15.8");
+    ESP_LOGI(TAG, "ESP32 UPS NUT Node - v15.10");
     ESP_LOGI(TAG, "ESP-IDF v5.3.1 target");
     ESP_LOGI(TAG, "=======================================");
 

@@ -1,4 +1,4 @@
-/*============================================================================
+﻿/*============================================================================
  MODULE: http_portal
 
  RESPONSIBILITY
@@ -37,6 +37,9 @@
              macro shared across all pages. HTTP_PAGE_BUF 8192, /compat 10240.
              Status color-coded by JS (OL=green, OB=amber, fault=red).
              Monospace data values, sans-serif labels. Responsive viewport.
+ R17  v15.10 Version bump. CyberPower OB fix (rid=0x29 authoritative, rid=0x80
+             ignored when ac=1). LB false-positive removed (bit1 != low_batt).
+             http_compat.c split from http_portal.c. Live poll clock on dashboard.
 
 ============================================================================*/
 
@@ -95,7 +98,7 @@ static const char *TAG = "http_portal";
     ".nav{margin-top:16px;font-family:Arial,sans-serif;font-size:0.82em}" \
     ".nav a{color:#4fc3f7;text-decoration:none;margin-right:16px}" \
     ".nav a:hover{color:#81d4fa}" \
-    ".poll{color:#555;font-size:0.75em;font-family:Arial,sans-serif;margin-top:8px}" \
+    ".poll{color:#aaa;font-size:0.75em;font-family:Arial,sans-serif;margin-top:8px}" \
     "input[type=text],input[type=password],input:not([type]){" \
        "background:#1c1c1c;border:1px solid #333;color:#e8e8e2;" \
        "padding:5px 8px;font-family:'Courier New',Courier,monospace;font-size:13px;width:260px}" \
@@ -382,17 +385,17 @@ static void render_dashboard(app_cfg_t *cfg, char *out, size_t outsz) {
         PORTAL_CSS
         "</head><body>"
         "<h2>ESP32-S3 UPS Node</h2>"
-        "<div class='subtitle'>v15.9 &mdash; NUT server on tcp/3493</div>"
+        "<div class='subtitle'>v15.10 &mdash; NUT server on tcp/3493</div>"
         "%s"
         "<table id='ups_tbl'>"
         "<tr><th>Manufacturer</th><td>%s</td></tr>"
         "<tr><th>Model</th><td>%s</td></tr>"
-        "<tr><th>Driver</th><td>esp32-nut-hid v15.9</td></tr>"
-        "<tr><th>Status</th><td id='td_status'><span class='%s'>%s</span></td></tr>"
+        "<tr><th>Driver</th><td>esp32-nut-hid v15.10</td></tr>"
+        "<tr><th>Status</th><td id='td_status' class='%s'>%s</td></tr>"
         "%s"
         "<tr><th>STA IP</th><td id='td_ip'>%s</td></tr>"
         "</table>"
-        "<div class='poll' id='td_poll'>Polling every 5s</div>"
+        "<div class='poll' id='td_poll'></div>"
         "<div class='nav'>"
         "<a href='/config'>Configure</a>"
         "<a href='/status'>Status JSON</a>"
@@ -410,42 +413,60 @@ static void render_dashboard(app_cfg_t *cfg, char *out, size_t outsz) {
           "if(!tr){"
             "tr=document.createElement('tr');"
             "tr.id=id;"
-            "tr.innerHTML='<th>'+lbl+'</th><td id=\'td_'+id+'\'></td>';"
+            "var ht=document.createElement('th');ht.textContent=lbl;var dt=document.createElement('td');dt.id='td_'+id;tr.appendChild(ht);tr.appendChild(dt);"
             "var ip=document.querySelector('#ups_tbl tr:last-child');"
             "ip.parentNode.insertBefore(tr,ip);"
           "}"
           "var td=document.getElementById('td_'+id);"
           "if(td)td.textContent=val;"
         "}"
-        "var t=setInterval(function(){"
-          "var x=new XMLHttpRequest();"
-          "x.open('GET','/status',true);"
-          "x.onload=function(){"
-            "if(x.status===200){"
-              "try{"
-                "var d=JSON.parse(x.responseText);"
-                "var sc=document.getElementById('td_status');"
-                "sc.innerHTML='<span class=\''+stCls(d.ups_status)+'\'>'+d.ups_status+'</span>';"
-                "document.getElementById('td_ip').textContent=d.sta_ip;"
-                "if(d.battery_charge!==null)addOrUpdate('tr_charge','Charge',d.battery_charge+'%%');"
-                "if(d.battery_runtime_s!==null){var rs=d.battery_runtime_s;"
-                "var rm=Math.floor(rs/60);var rse=rs%%60;"
-                "var rt=rm>0?(rm+'m '+(rse<10?'0':'')+rse+'s'):rse+'s';"
-                "addOrUpdate('tr_runtime','Runtime',rt);}"
-                "if(d.battery_voltage_v!==null)addOrUpdate('tr_bvolt','Batt Voltage',d.battery_voltage_v.toFixed(3)+' V');"
-                "if(d.input_voltage_v!==null)addOrUpdate('tr_ivolt','Input Voltage',d.input_voltage_v.toFixed(1)+' V');"
-                "if(d.output_voltage_v!==null)addOrUpdate('tr_ovolt','Output Voltage',d.output_voltage_v.toFixed(1)+' V');"
-                "if(d.ups_load_pct!==null)addOrUpdate('tr_load','Load',d.ups_load_pct+'%%');"
-                "document.getElementById('td_poll').textContent='Updated: '+new Date().toLocaleTimeString();"
-              "}catch(e){}"
-            "}"
-          "};"
-          "x.onerror=function(){"
-            "document.getElementById('td_poll').textContent='Poll error \u2014 retrying...';"
-          "};"
-          "x.send();"
-        "},5000);"
-        "window.addEventListener('beforeunload',function(){clearInterval(t);});"
+"var lastOk=Date.now();"
+"function fmtAge(){"
+  "var s=Math.round((Date.now()-lastOk)/1000);"
+  "if(s<5)return'Just updated';"
+  "if(s<60)return s+'s ago';"
+  "return Math.floor(s/60)+'m '+('0'+s%%60).slice(-2)+'s ago';"
+"}"
+"var ck=setInterval(function(){"
+  "document.getElementById('td_poll').textContent=fmtAge();"
+"},1000);"
+"function doPoll(){"
+  "var x=new XMLHttpRequest();"
+  "x.open('GET','/status',true);"
+  "x.onload=function(){"
+    "if(x.status===200){"
+      "try{"
+        "var d=JSON.parse(x.responseText);"
+        "var sc=document.getElementById('td_status');"
+        "sc.className=stCls(d.ups_status);sc.textContent=d.ups_status;"
+        "document.getElementById('td_ip').textContent=d.sta_ip;"
+        "if(d.battery_charge!==null)addOrUpdate('tr_charge','Charge',d.battery_charge+'%%');"
+        "if(d.battery_runtime_s!==null){var rs=d.battery_runtime_s;"
+        "var rm=Math.floor(rs/60);var rse=rs%%60;"
+        "var rt=rm>0?(rm+'m '+(rse<10?'0':'')+rse+'s'):rse+'s';"
+        "addOrUpdate('tr_runtime','Runtime',rt);}"
+        "if(d.battery_voltage_v!==null)addOrUpdate('tr_bvolt','Batt Voltage',d.battery_voltage_v.toFixed(3)+' V');"
+        "if(d.input_voltage_v!==null)addOrUpdate('tr_ivolt','Input Voltage',d.input_voltage_v.toFixed(1)+' V');"
+        "if(d.output_voltage_v!==null)addOrUpdate('tr_ovolt','Output Voltage',d.output_voltage_v.toFixed(1)+' V');"
+        "if(d.ups_load_pct!==null)addOrUpdate('tr_load','Load',d.ups_load_pct+'%%');"
+        "lastOk=Date.now();"
+      "}catch(e){}"
+    "}"
+  "};"
+  "x.onerror=function(){"
+    "document.getElementById('td_poll').textContent='Poll error \u2014 retrying...';"
+  "};"
+  "x.send();"
+"}"
+"doPoll();"
+"var t=setInterval(doPoll,5000);"
+"window.addEventListener('beforeunload',function(){clearInterval(t);clearInterval(ck);});"
+        
+
+
+
+
+
         "</script>"
         "</body></html>",
         pw_warn,
@@ -529,7 +550,7 @@ static void compat_head(char *buf, size_t sz) {
         "</style>"
         "</head><body>"
         "<h2>Compatible UPS List</h2>"
-        "<div class='subtitle'>ESP32-S3 UPS Node v15.9 "
+        "<div class='subtitle'>ESP32-S3 UPS Node v15.10 "
         "&mdash; NUT usbhid-ups driver &mdash; 29 manufacturers / 338+ devices</div>"
         "<div style='font-family:Arial,sans-serif;font-size:0.82em;color:#888;"
              "margin-bottom:14px;line-height:1.6'>"
@@ -1032,7 +1053,7 @@ static void render_config(app_cfg_t *cfg, char *out, size_t outsz,
         PORTAL_CSS
         "</head><body>"
         "<h2>ESP32-S3 UPS Node</h2>"
-        "<div class='subtitle'>v15.9 &mdash; Configuration</div>"
+        "<div class='subtitle'>v15.10 &mdash; Configuration</div>"
         "%s%s"
         "<form method='POST' action='/save'>"
         "<div class='form-section'>Wi-Fi (STA)</div>"

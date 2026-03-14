@@ -19,10 +19,13 @@ public
 main
 
 ## Version
-v15.9
+v15.10
 
 ## Commit Message
-- Add root .gitignore - exclude archive/, backups/, CLAUDE.md, PROJECT.md, build artifacts
-- Remove archive/ and backups/ from repo tracking (local working folders only)
-- Fix label-new-issue.yml - YAML syntax error from backtick template literals
-- Fix update-compat-list.yml - YAML syntax error from backtick template literals
+- CyberPower OB fix: rid=0x29 authoritative, rid=0x80 ignored when ac_present=1
+- Remove LB false-positive: rid=0x29 bit1 is discharge flag not low-battery
+- AJAX portal auto-refresh fixed: sc.className+textContent replaces broken innerHTML
+- addOrUpdate row insert fixed: createElement replaces broken innerHTML string
+- Poll clock made visible (#aaa color)
+- Version strings updated to v15.10 throughout http_portal.c
+- Add #include stdio.h to http_compat.c (build fix)

@@ -1,74 +1,75 @@
-# NUT Node Project — Next Steps (Cold-Start Brief)
-# Updated: 2026-03-13 (session 11)
+# Next Steps — esp32-s3-nut-node
+
+## Cold-Start Resume Instructions (Session 16)
+
+Read project_state.md first — it has the full bug description and exact fix.
 
 ---
 
-## What was completed this session
-- ha-mcp MCP server installed and confirmed connected to HA
-- Full HA health check — all issues catalogued
-- Identified and documented 3 dead HA integrations to remove
-- Began Anthony arrival automation — GPS + BLE combined trigger
-- Test automation created for S24+ (template for Anthony's version)
-- Confirmed iBeacon Tracker installed, Bermuda installed (1 proxy only)
-- v14.25 R9 + R10 firmware written — NOT YET FLASHED
+## Immediate Next Action
 
-## What is confirmed working
-- ESP32 NUT node on 10.0.0.190:3493 — stable, serving 17 NUT variables
-- v14.25 R10 code written (portal auth + AJAX dashboard + default password warning)
-- GitHub repo live: https://github.com/Driftah9/esp32-s3-nut-node
-- HA health: Z2M online, all Zigbee sensors good, backups current, all updates applied
-- Angel is Home test automation DELETED (automation.angel_is_home_gps_ble_test — removed 2026-03-13)
+**Fix AJAX auto-refresh in http_portal.c**
 
----
+The portal does not auto-refresh. Root cause: malformed JS quote escaping in the
+`doPoll()` callback causes silent JS failure. Fix is two PowerShell replacements.
 
-## Exact next steps (priority order)
+### Step 1 — Read http_portal.c fresh to confirm strings before replacing
 
-### 1 — HA UI cleanup (IMMEDIATE — do via browser)
-Go to http://10.0.0.10:8123/config/integrations and delete:
-- ESPHome `esphome-nut01` (three dots → Delete)
-- ESPHome `ESPS3-Nut01` (three dots → Delete)
-- Network UPS Tools `10.0.0.6:3493` (three dots → Delete)
+Claude should read the file and find the exact current strings before running
+PowerShell replacements. The two target locations are:
 
-Then add new NUT integration:
-- Add Integration → Network UPS Tools
-- Host: `10.0.0.190` | Port: `3493` | Username: `admin` | Password: `admin`
-This will clear the NUT addon ERROR state.
+**Location 1 — inside doPoll() JS callback (around line 390-400):**
+Look for: `sc.innerHTML=` — this is the broken status update line
 
-### 2 — Flash v14.25 R10
+**Location 2 — inside render_dashboard snprintf (around line 340-350):**
+Look for: `td_status` — this is the static HTML initial render
+
+### Step 2 — Apply fix via PowerShell
+
 ```powershell
-cd D:\Users\Stryder\Documents\Claude\Projects\esp32-s3-nut-node\src\current
-idf.py build flash -p COM3
-idf.py monitor -p COM3
+$file = "D:\Users\Stryder\Documents\Claude\Projects\esp32-s3-nut-node\src\current\main\http_portal.c"
+$content = Get-Content $file -Raw -Encoding UTF8
+
+# Fix 1: JS callback — replace innerHTML with className+textContent
+$content = $content -replace [regex]::Escape("sc.innerHTML='<span class=\\''+stCls(d.ups_status)+'\\'>'+d.ups_status+'</span>';"), "sc.className=stCls(d.ups_status);sc.textContent=d.ups_status;"
+
+# Fix 2: Static HTML — remove span wrapper from td_status
+$content = $content -replace [regex]::Escape("<tr><th>Status</th><td id='td_status'><span class='%s'>%s</span></td></tr>"), "<tr><th>Status</th><td id='td_status' class='%s'>%s</td></tr>"
+
+Set-Content $file $content -Encoding UTF8 -NoNewline
+Write-Host "Done"
 ```
 
-### 3 — Anthony arrival automation
-- Replace `device_tracker.galaxy_s24plus` → Anthony's GPS tracker
-- Replace Bermuda tracker → Anthony's Pixel Pro 8 Bermuda tracker
-- Message: "Anthony is Home"
-- Speaker: as desired
+### Step 3 — Build and flash
 
-### 5 — HA stale entity cleanup (low priority, cosmetic)
-- Delete 3 unavailable iBeacon trackers (l_to_3234_00e6, l_to_3234_00ee, globuse_1_4_9bef) via HA UI
-- Delete duplicate Alexa alarm/timer sensors (_2 versions) via HA UI
-- Delete orphaned `media_player.master_bedroom_speaker_sendspin` via HA UI
+```powershell
+cd D:\Users\Stryder\Documents\Claude\Projects\esp32-s3-nut-node\src\current
+idf.py build flash -p COM3 monitor
+```
 
-### 6 — Z2M TCP keepalive fix
-- Navigate to TubeZB coordinator web UI (find its IP on network)
-- Enable TCP keepalive / heartbeat — set to 30-60 seconds
-- Monitor Z2M connection state over 48 hours
+### Step 4 — Validate
 
----
+- Open portal in Firefox at http://10.0.0.190
+- Watch the `td_poll` clock tick (bottom of table — "Just updated", then "5s ago", etc.)
+- Unplug UPS — status should change to OB within ~10s WITHOUT manual page refresh
+- Plug back in — status should return to OL within ~10s WITHOUT manual page refresh
 
-## Blockers / open questions
-- ESP32 minor items still deferred: driver.version shows 14.24, AP password not set
-- Bermuda only has 1 BLE proxy — distance/trilateration unreliable until more proxies built
-- Anthony BLE arrival trigger: currently GPS-only until iBeacon broadcasting confirmed on Pixel 8 Pro
-- Linux NUT hub (M9) still on hold — static IP for linuxtest LXC not yet assigned
+### Step 5 — Push to GitHub
+
+```powershell
+cd D:\Users\Stryder\Documents\Claude\Projects\esp32-s3-nut-node
+.\git-push.ps1
+```
 
 ---
 
-## Project paths
-- Source: `D:\Users\Stryder\Documents\Claude\Projects\esp32-s3-nut-node\src\current\main\`
-- GitHub: https://github.com/Driftah9/esp32-s3-nut-node
-- ESP32 IP: 10.0.0.190 | NUT: tcp/3493 | Portal: http://10.0.0.190
-- Build: ESP-IDF 5.3 PowerShell → `idf.py build flash -p COM3`
+## After AJAX Fix — Remaining Tasks
+
+| Task | Priority | Notes |
+|------|----------|-------|
+| GitHub push v15.10 | High | After AJAX fix confirmed |
+| AP password | Medium | http://10.0.0.190/config → AP Password (8+ chars) |
+| Z2M TCP keepalive | Medium | TubeZB coordinator web UI, 30-60s |
+| Linux NUT hub (M9) | Low | Static IP for linuxtest LXC not assigned yet |
+| Context warning in prefs | Low | Add to Claude_communication_preference.md |
+| git tag v15.10 | Low | Removes -dirty from app version string |
