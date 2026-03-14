@@ -1,0 +1,1352 @@
+/* main.c CURRENT VERSION: v12
+ * Version tracking:
+ *   v8 (2026-03-05): Milestone 5 start: maintain decoded UPS state + NUT-style status logs.
+ *                   Disable full HID report descriptor dump by default (V7 control submit ESP_ERR_INVALID_ARG).
+ *                   Keep usb_host_lib_handle_events() pump + async client callback + change-only IN logging.
+ *   v9 (2026-03-05): Milestone 6 start: track remaining common RIDs (0x06/0x14/0x21),
+ *   v10 (2026-03-05): LAN mode: switch from SoftAP to WiFi STA (DHCP) so NUT clients on the LAN can connect.
+ *   v11 (2026-03-05): Milestone 8 start: Minimal NUT (upsd-like) TCP server on port 3493 (read-only).
+ *                   add RID counters + last-seen timestamps, add flags bit breakdown,
+ *                   and add state freshness timestamps (kept out of change-detection to avoid spam).
+ *
+ * Notes:
+ * - This is a full drop-in file (copy/paste replace main.c).
+ * - USB plumbing path intentionally kept stable from v8.
+ */
+
+#include <stdio.h>
+#include <string.h>
+#include <inttypes.h>
+#include <stdbool.h>
+#include <stdarg.h>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
+#include "freertos/event_groups.h"
+
+#include "esp_log.h"
+#include "esp_err.h"
+
+#include "usb/usb_host.h"
+#include "usb/usb_types_ch9.h"
+
+#include "esp_timer.h"   // esp_timer_get_time()
+
+/* Milestone 7: WiFi + HTTP */
+#include "nvs_flash.h"
+#include "esp_event.h"
+#include "esp_netif.h"
+#include "esp_wifi.h"
+#include "esp_http_server.h"
+
+/* Milestone 8: NUT TCP server */
+#include "lwip/sockets.h"
+#include "lwip/inet.h"
+
+
+// ===================== REVERT INDEX =====================
+// REVERT[M3-A-001]: (2026-03-05) Use async client callback + usb_host_client_handle_events(client, timeout) (2 args).
+// REVERT[M3-A-002]: (2026-03-05) Do NOT use usb_device_info_t.idVendor/idProduct (fields differ). Use usb_host_get_device_descriptor() (ptr-to-ptr).
+// REVERT[M3-A-003]: (2026-03-05) IDF v5.3.1 transfer type is usb_transfer_t (NOT usb_host_transfer_t).
+// REVERT[M3-A-004]: (2026-03-05) Endpoint direction test uses (ep & 0x80) instead of missing macros.
+// REVERT[M3-A-005]: (2026-03-05) XFERTYPE mask macro is USB_BM_ATTRIBUTES_XFERTYPE_MASK (not *_M).
+// REVERT[M3-A-006]: (2026-03-05) NEW_DEV address saved from callback, not hardcoded.
+// REVERT[M3-A-007]: (2026-03-05) No usb_host_transfer_cancel / usb_host_release_config_descriptor in v5.3.1.
+// REVERT[M3-IN-001]: (2026-03-05) Change-only logging for interrupt IN reports.
+// REVERT[M4-D-001]: (2026-03-05) Decode report IDs 0x0C batt/runtime, 0x13 AC, 0x16 flags (little-endian).
+// =========================================================
+
+static const char *TAG = "UPS_USB_M3";
+
+// Optional: compile-time VID/PID filter (disabled in v12)
+#define UPS_VID 0x051d  // APC (example only; not required when UPS_FILTER_ENABLE=0)
+#define UPS_PID 0x0002  // APC (example only; not required when UPS_FILTER_ENABLE=0)
+
+// Set to 1 to require a specific VID/PID match (see UPS_VID/UPS_PID above)
+#define UPS_FILTER_ENABLE 0
+
+
+// HID descriptor types
+#define USB_DESC_TYPE_HID        0x21
+#define USB_DESC_TYPE_HID_REPORT 0x22
+
+// v8+: disable by default because V7 hit ESP_ERR_INVALID_ARG on submit (likely size/path constraint)
+#define ENABLE_REPORT_DESCRIPTOR_DUMP 0
+
+static inline uint16_t rd_le16(const uint8_t *p) { return (uint16_t)(p[0] | ((uint16_t)p[1] << 8)); }
+static inline uint32_t rd_le32(const uint8_t *p) { return (uint32_t)(p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24)); }
+
+// Heuristic: detect "Power Device"/UPS class HID report descriptors without needing VID/PID.
+// HID Usage Page "Power Device" = 0x84, "Battery System" = 0x85. Many UPSes expose one or both.
+static bool hid_report_desc_looks_like_ups(const uint8_t *d, size_t n)
+{
+    if (!d || n < 4) return false;
+
+    // Look for USAGE_PAGE (0x05) 0x84 or 0x85
+    for (size_t i = 0; i + 1 < n; i++) {
+        if (d[i] == 0x05 && (d[i + 1] == 0x84 || d[i + 1] == 0x85)) return true;
+    }
+    // Look for long form USAGE_PAGE (0x06) 0x84 0x00 or 0x85 0x00
+    for (size_t i = 0; i + 2 < n; i++) {
+        if (d[i] == 0x06 && (d[i + 1] == 0x84 || d[i + 1] == 0x85) && d[i + 2] == 0x00) return true;
+    }
+    return false;
+}
+
+static inline uint32_t now_ms(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000ULL);
+}
+
+// USB host handles
+static usb_host_client_handle_t s_client = NULL;
+static usb_device_handle_t      s_dev    = NULL;
+
+// Device address from NEW_DEV
+static volatile uint8_t s_new_dev_addr = 0;
+
+// HID interface/endpoint
+static int      s_hid_intf_num = -1;
+static uint8_t  s_ep_in_addr   = 0;
+static uint16_t s_ep_in_mps    = 0;
+static uint16_t s_hid_report_desc_len = 0;
+
+// Interrupt IN tracking (change-only)
+static uint8_t  s_last_in[64];
+static int      s_last_in_len = -1;
+
+// v9: report tracking
+static uint8_t  s_last_rid = 0;
+static uint32_t s_last_report_ms = 0;
+
+static uint32_t s_rid06_count = 0, s_rid14_count = 0, s_rid21_count = 0;
+static uint32_t s_rid06_last_ms = 0, s_rid14_last_ms = 0, s_rid21_last_ms = 0;
+
+static uint8_t  s_rid06_last[8]; static int s_rid06_last_len = 0;
+static uint8_t  s_rid14_last[8]; static int s_rid14_last_len = 0;
+static uint8_t  s_rid21_last[8]; static int s_rid21_last_len = 0;
+
+// Event flags
+static volatile bool s_dev_connected = false;
+static volatile bool s_dev_gone      = false;
+
+/* =========================================================
+ * Milestone 5/6: UPS state model (minimal)
+ * ========================================================= */
+typedef struct {
+    bool     have_batt;
+    bool     have_runtime;
+    bool     have_ac;
+    bool     have_flags;
+
+    uint8_t  battery_charge_pct;   // from 0x0C byte1
+    uint32_t battery_runtime_s;     // from 0x0C bytes2..3 (u16) but store in u32
+    uint8_t  ac_present;           // from 0x13 byte1 (0/1)
+    uint32_t flags;                // from 0x16 bytes1..4 (u32)
+
+    // Derived (best-effort)
+    bool     on_battery;           // derived from AC_present (if known)
+
+    // v9: freshness timestamps (ms since boot); excluded from print-equality checks
+    uint32_t batt_ms;
+    uint32_t runtime_ms;
+    uint32_t ac_ms;
+    uint32_t flags_ms;
+} ups_state_t;
+
+static ups_state_t s_state = {0};
+static ups_state_t s_state_last_printed = {0};
+
+/* Milestone 8: guard snapshots across USB callback + network threads */
+static portMUX_TYPE s_state_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static bool state_equals_for_print(const ups_state_t *a, const ups_state_t *b)
+{
+    // NOTE: timestamps intentionally ignored to avoid status spam when values refresh unchanged.
+    return (a->have_batt == b->have_batt) &&
+           (a->have_runtime == b->have_runtime) &&
+           (a->have_ac == b->have_ac) &&
+           (a->have_flags == b->have_flags) &&
+           (a->battery_charge_pct == b->battery_charge_pct) &&
+           (a->battery_runtime_s == b->battery_runtime_s) &&
+           (a->ac_present == b->ac_present) &&
+           (a->flags == b->flags) &&
+           (a->on_battery == b->on_battery);
+}
+
+static void update_derived_state(ups_state_t *st)
+{
+    if (st->have_ac) {
+        st->on_battery = (st->ac_present == 0);
+    }
+}
+
+static void log_flags_bits(uint32_t flags)
+{
+    // v9: simple bit view (0..15). Expand later once meanings are known.
+    char buf[128];
+    int pos = 0;
+    for (int b = 0; b < 16 && pos < (int)sizeof(buf) - 8; b++) {
+        int set = (int)((flags >> b) & 1U);
+        pos += snprintf(&buf[pos], sizeof(buf) - pos, "%d:%d ", b, set);
+    }
+    ESP_LOGI(TAG, "flags bits[0..15]: %s", buf);
+}
+
+static void log_nut_style_if_changed(void)
+{
+    if (!state_equals_for_print(&s_state, &s_state_last_printed)) {
+        s_state_last_printed = s_state;
+
+        const uint32_t tms = now_ms();
+
+        // Best-effort NUT-ish status: OL vs OB
+        const char *ups_status = "UNKNOWN";
+        if (s_state.have_ac) {
+            ups_status = s_state.on_battery ? "OB" : "OL";
+        }
+
+        ESP_LOGI(TAG, "----- NUT-ish status (Milestone 5/6) -----");
+
+        if (s_state.have_batt) {
+            ESP_LOGI(TAG, "battery.charge: %u", (unsigned)s_state.battery_charge_pct);
+            ESP_LOGI(TAG, "battery.charge.age_ms: %" PRIu32, (uint32_t)(tms - s_state.batt_ms));
+        } else {
+            ESP_LOGI(TAG, "battery.charge: (unknown)");
+        }
+
+        if (s_state.have_runtime) {
+            ESP_LOGI(TAG, "battery.runtime: %" PRIu32, s_state.battery_runtime_s);
+            ESP_LOGI(TAG, "battery.runtime.age_ms: %" PRIu32, (uint32_t)(tms - s_state.runtime_ms));
+        } else {
+            ESP_LOGI(TAG, "battery.runtime: (unknown)");
+        }
+
+        if (s_state.have_ac) {
+            ESP_LOGI(TAG, "input.utility.present: %u", (unsigned)s_state.ac_present);
+            ESP_LOGI(TAG, "input.utility.present.age_ms: %" PRIu32, (uint32_t)(tms - s_state.ac_ms));
+        } else {
+            ESP_LOGI(TAG, "input.utility.present: (unknown)");
+        }
+
+        if (s_state.have_flags) {
+            ESP_LOGI(TAG, "ups.flags: 0x%08" PRIX32, s_state.flags);
+            ESP_LOGI(TAG, "ups.flags.age_ms: %" PRIu32, (uint32_t)(tms - s_state.flags_ms));
+        } else {
+            ESP_LOGI(TAG, "ups.flags: (unknown)");
+        }
+
+        ESP_LOGI(TAG, "ups.status: %s", ups_status);
+
+        // v9 driver tracking
+        ESP_LOGI(TAG, "driver.last_rid: 0x%02X", (unsigned)s_last_rid);
+        ESP_LOGI(TAG, "driver.last_report_ms: %" PRIu32, s_last_report_ms);
+        ESP_LOGI(TAG, "driver.rid06.count: %" PRIu32 " last_ms=%" PRIu32, s_rid06_count, s_rid06_last_ms);
+        ESP_LOGI(TAG, "driver.rid14.count: %" PRIu32 " last_ms=%" PRIu32, s_rid14_count, s_rid14_last_ms);
+        ESP_LOGI(TAG, "driver.rid21.count: %" PRIu32 " last_ms=%" PRIu32, s_rid21_count, s_rid21_last_ms);
+
+        ESP_LOGI(TAG, "----------------------------------------");
+    }
+}
+
+// Control transfer sync
+typedef struct {
+    SemaphoreHandle_t done;
+    esp_err_t status;
+    int actual_num_bytes;
+} ctrl_wait_t;
+
+// REVERT[M3-A-003]: transfer type is usb_transfer_t in IDF v5.3.1.
+static void ctrl_xfer_cb(usb_transfer_t *t)
+{
+    ctrl_wait_t *w = (ctrl_wait_t *)t->context;
+    if (w) {
+        w->status = t->status;
+        w->actual_num_bytes = (int)t->actual_num_bytes;
+        xSemaphoreGive(w->done);
+    }
+}
+
+static void intr_in_cb(usb_transfer_t *t);
+
+/* Milestone 7 forward decls */
+static void wifi_init_sta(void);
+static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
+
+/* WiFi connect state */
+static EventGroupHandle_t s_wifi_event_group;
+static int s_wifi_retry_num = 0;
+static bool s_net_services_started = false;
+static char s_sta_ip_str[16] = "0.0.0.0";
+#define WIFI_CONNECTED_BIT BIT0
+
+// ---------- USB Host client event callback ----------
+static void client_event_cb(const usb_host_client_event_msg_t *event_msg, void *arg)
+{
+    (void)arg;
+    if (!event_msg) return;
+
+    switch (event_msg->event) {
+    case USB_HOST_CLIENT_EVENT_NEW_DEV:
+        s_new_dev_addr = event_msg->new_dev.address; // REVERT[M3-A-006]
+        s_dev_connected = true;
+        ESP_LOGI(TAG, "NEW_DEV received: addr=%u", (unsigned)s_new_dev_addr);
+        break;
+
+    case USB_HOST_CLIENT_EVENT_DEV_GONE:
+        s_dev_gone = true;
+        ESP_LOGW(TAG, "DEV_GONE received");
+        break;
+
+    default:
+        break;
+    }
+}
+
+// ---------- Descriptor parsing ----------
+static bool parse_hid_intf_and_ep(const uint8_t *cfg, int cfg_len,
+                                 int *out_intf, uint8_t *out_ep_in, uint16_t *out_mps,
+                                 uint16_t *out_hid_rpt_len)
+{
+    int cur_intf = -1;
+    bool in_hid_intf = false;
+    uint16_t hid_rpt_len = 0;
+    uint8_t ep_in = 0;
+    uint16_t ep_mps = 0;
+
+    int i = 0;
+    while (i + 2 <= cfg_len) {
+        uint8_t bLength = cfg[i];
+        uint8_t bDescriptorType = cfg[i + 1];
+        if (bLength < 2) break;
+        if (i + bLength > cfg_len) break;
+
+        if (bDescriptorType == USB_B_DESCRIPTOR_TYPE_INTERFACE && bLength >= sizeof(usb_intf_desc_t)) {
+            const usb_intf_desc_t *intf = (const usb_intf_desc_t *)&cfg[i];
+            cur_intf = intf->bInterfaceNumber;
+
+            in_hid_intf = (intf->bInterfaceClass == USB_CLASS_HID);
+            if (in_hid_intf) {
+                ESP_LOGI(TAG, "HID interface intf=%u alt=%u subclass=0x%02x proto=0x%02x",
+                         (unsigned)intf->bInterfaceNumber, (unsigned)intf->bAlternateSetting,
+                         (unsigned)intf->bInterfaceSubClass, (unsigned)intf->bInterfaceProtocol);
+            }
+        } else if (bDescriptorType == USB_DESC_TYPE_HID && in_hid_intf && bLength >= 9) {
+            // HID descriptor: [6]=descType [7..8]=descLen (first class descriptor)
+            uint8_t descType = cfg[i + 6];
+            uint16_t descLen = rd_le16(&cfg[i + 7]);
+            if (descType == USB_DESC_TYPE_HID_REPORT) {
+                hid_rpt_len = descLen;
+                ESP_LOGI(TAG, "HID Report Descriptor length = %u bytes (from HID descriptor 0x21)", (unsigned)hid_rpt_len);
+
+            // Probe the HID Report Descriptor to ensure this is a UPS/PowerDevice-style HID.
+            // This is how we "scan" for UPSes without a hardcoded VID/PID.
+            if (!UPS_FILTER_ENABLE && hid_rpt_len > 0) {
+                size_t probe_len = hid_rpt_len;
+                if (probe_len > 256) probe_len = 256; // enough for Usage Page / top-level collection
+                uint8_t *probe = (uint8_t *)malloc(probe_len);
+                if (probe) {
+                    size_t got = 0;
+                    esp_err_t pr = usb_control_get_descriptor(s_dev, USB_DESC_TYPE_HID_REPORT, 0 /*index*/,
+                                                             (uint16_t)hid_intf_num /*wIndex=intf*/,
+                                                             probe, probe_len, &got);
+                    if (pr == ESP_OK && got > 0) {
+                        if (!hid_report_desc_looks_like_ups(probe, got)) {
+                            ESP_LOGW(TAG, "HID interface does not look like a UPS (no PowerDevice/BatterySystem usage page); ignoring device");
+                            free(probe);
+                            usb_host_device_close(s_dev);
+                            s_dev = NULL;
+                            return;
+                        }
+                    } else {
+                        // If we can't read the report descriptor, stay permissive (some devices are picky early on).
+                        ESP_LOGW(TAG, "Could not probe HID report descriptor (err=%s got=%u); proceeding anyway",
+                                 esp_err_to_name(pr), (unsigned)got);
+                    }
+                    free(probe);
+                }
+            }
+            }
+        } else if (bDescriptorType == USB_B_DESCRIPTOR_TYPE_ENDPOINT && in_hid_intf && bLength >= sizeof(usb_ep_desc_t)) {
+            const usb_ep_desc_t *ep = (const usb_ep_desc_t *)&cfg[i];
+
+            // REVERT[M3-A-005]: use USB_BM_ATTRIBUTES_XFERTYPE_MASK
+            const uint8_t xfer_type = (ep->bmAttributes & USB_BM_ATTRIBUTES_XFERTYPE_MASK);
+
+            // REVERT[M3-A-004]: IN direction test uses bit7 (0x80)
+            const bool is_in = ((ep->bEndpointAddress & 0x80) != 0);
+
+            if ((xfer_type == USB_BM_ATTRIBUTES_XFER_INT) && is_in) {
+                ep_in = ep->bEndpointAddress;
+                ep_mps = ep->wMaxPacketSize;
+                ESP_LOGI(TAG, "Interrupt IN EP=0x%02x MPS=%u", (unsigned)ep_in, (unsigned)ep_mps);
+            }
+        }
+
+        i += bLength;
+    }
+
+    if (cur_intf >= 0 && ep_in != 0 && ep_mps != 0 && hid_rpt_len != 0) {
+        *out_intf = cur_intf;
+        *out_ep_in = ep_in;
+        *out_mps = ep_mps;
+        *out_hid_rpt_len = hid_rpt_len;
+        return true;
+    }
+    return false;
+}
+
+// ---------- Control GET_DESCRIPTOR (Report) ----------
+static esp_err_t usb_control_get_descriptor(usb_device_handle_t dev,
+                                           uint8_t bmRequestType, uint8_t bRequest,
+                                           uint16_t wValue, uint16_t wIndex,
+                                           uint8_t *out, int out_len,
+                                           int *out_actual)
+{
+    if (!dev || !out || out_len <= 0) return ESP_ERR_INVALID_ARG;
+
+    usb_transfer_t *t = NULL; // REVERT[M3-A-003]
+    const int xfer_len = (int)sizeof(usb_setup_packet_t) + out_len;
+
+    esp_err_t err = usb_host_transfer_alloc(xfer_len, 0, &t);
+    if (err != ESP_OK || !t) return err;
+
+    ctrl_wait_t w = {
+        .done = xSemaphoreCreateBinary(),
+        .status = ESP_FAIL,
+        .actual_num_bytes = 0,
+    };
+    if (!w.done) {
+        usb_host_transfer_free(t);
+        return ESP_ERR_NO_MEM;
+    }
+
+    usb_setup_packet_t *setup = (usb_setup_packet_t *)t->data_buffer;
+    setup->bmRequestType = bmRequestType;
+    setup->bRequest      = bRequest;
+    setup->wValue        = wValue;
+    setup->wIndex        = wIndex;
+    setup->wLength       = (uint16_t)out_len;
+
+    t->device_handle = dev;
+    t->bEndpointAddress = 0; // EP0
+    t->callback = ctrl_xfer_cb;
+    t->context = &w;
+    t->num_bytes = xfer_len;
+
+    err = usb_host_transfer_submit(t);
+    if (err != ESP_OK) {
+        vSemaphoreDelete(w.done);
+        usb_host_transfer_free(t);
+        return err;
+    }
+
+    xSemaphoreTake(w.done, portMAX_DELAY);
+
+    err = w.status;
+    if (err == ESP_OK) {
+        int got = w.actual_num_bytes - (int)sizeof(usb_setup_packet_t);
+        if (got < 0) got = 0;
+        if (got > out_len) got = out_len;
+        memcpy(out, (uint8_t *)t->data_buffer + sizeof(usb_setup_packet_t), got);
+        if (out_actual) *out_actual = got;
+    }
+
+    vSemaphoreDelete(w.done);
+    usb_host_transfer_free(t);
+    return err;
+}
+
+static void hid_get_report_descriptor_and_dump_once(void)
+{
+#if ENABLE_REPORT_DESCRIPTOR_DUMP
+    if (!s_dev || s_hid_intf_num < 0 || s_hid_report_desc_len == 0) return;
+
+    ESP_LOGI(TAG, "Descriptor dump enabled: attempting GET_DESCRIPTOR(report).");
+    ESP_LOGI(TAG, "Requesting HID Report Descriptor via control transfer: intf=%d len=%u",
+             s_hid_intf_num, (unsigned)s_hid_report_desc_len);
+
+    uint8_t *buf = (uint8_t *)heap_caps_malloc(s_hid_report_desc_len, MALLOC_CAP_DEFAULT);
+    if (!buf) {
+        ESP_LOGE(TAG, "malloc failed for report descriptor (%u)", (unsigned)s_hid_report_desc_len);
+        return;
+    }
+
+    int actual = 0;
+
+    esp_err_t err = usb_control_get_descriptor(
+        s_dev,
+        0x81, 0x06,
+        (uint16_t)((USB_DESC_TYPE_HID_REPORT << 8) | 0x00),
+        (uint16_t)s_hid_intf_num,
+        buf, (int)s_hid_report_desc_len,
+        &actual
+    );
+
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "GET_DESCRIPTOR(report) failed: %s", esp_err_to_name(err));
+        heap_caps_free(buf);
+        return;
+    }
+
+    ESP_LOGI(TAG, "HID Report Descriptor received: %d bytes", actual);
+    ESP_LOGI(TAG, "\n===== HID REPORT DESCRIPTOR BEGIN =====");
+    for (int i = 0; i < actual; i += 16) {
+        char line[16 * 3 + 1];
+        int pos = 0;
+        int n = (actual - i) > 16 ? 16 : (actual - i);
+        for (int j = 0; j < n; j++) {
+            pos += snprintf(&line[pos], sizeof(line) - pos, "%02X%s", buf[i + j], (j == n - 1) ? "" : " ");
+        }
+        ESP_LOGI(TAG, "%s", line);
+    }
+    ESP_LOGI(TAG, "===== HID REPORT DESCRIPTOR END =====\n");
+    heap_caps_free(buf);
+#else
+    // default: skip to avoid control submit errors; IN reports are sufficient for Milestone 5/6.
+    (void)0;
+#endif
+}
+
+// ---------- Interrupt IN Reader ----------
+static void decode_and_update_state(const uint8_t *d, int len)
+{
+    if (!d || len <= 0) return;
+
+    uint8_t rid = d[0];
+    const uint32_t tms = now_ms();
+
+    
+if (rid == 0x0C && len >= 4) {
+    uint8_t batt = d[1];
+    uint16_t runtime_s = rd_le16(&d[2]);
+
+    taskENTER_CRITICAL(&s_state_mux);
+    s_state.battery_charge_pct = batt;
+    s_state.battery_runtime_s = (uint32_t)runtime_s;
+    s_state.have_batt = true;
+    s_state.have_runtime = true;
+    taskEXIT_CRITICAL(&s_state_mux);
+
+    ESP_LOGI(TAG, "DECODE 0x0C: batt=%u%% runtime=%u s", (unsigned)batt, (unsigned)runtime_s);
+
+} else if (rid == 0x13 && len >= 2) {
+        uint8_t ac = d[1];
+        s_state.ac_present = ac;
+        s_state.have_ac = true;
+        s_state.ac_ms = tms;
+
+        ESP_LOGI(TAG, "DECODE 0x13: AC_present=%u", (unsigned)ac);
+
+    } else if (rid == 0x16 && len >= 5) {
+        uint32_t flags = rd_le32(&d[1]);
+        s_state.flags = flags;
+        s_state.have_flags = true;
+        s_state.flags_ms = tms;
+
+        ESP_LOGI(TAG, "DECODE 0x16: flags=0x%08" PRIX32, flags);
+        log_flags_bits(flags);
+
+    } else if (rid == 0x06) {
+        s_rid06_count++;
+        s_rid06_last_ms = tms;
+        s_rid06_last_len = (len > 8) ? 8 : len;
+        memcpy(s_rid06_last, d, (size_t)s_rid06_last_len);
+
+        if (len >= 4) {
+            ESP_LOGI(TAG, "RID 0x06: b1=%u b2=%u b3=%u (len=%d)",
+                     (unsigned)d[1], (unsigned)d[2], (unsigned)d[3], len);
+        } else {
+            ESP_LOGI(TAG, "RID 0x06: len=%d", len);
+        }
+
+    } else if (rid == 0x14) {
+        s_rid14_count++;
+        s_rid14_last_ms = tms;
+        s_rid14_last_len = (len > 8) ? 8 : len;
+        memcpy(s_rid14_last, d, (size_t)s_rid14_last_len);
+
+        ESP_LOGI(TAG, "RID 0x14: tracked (unknown payload) len=%d", len);
+
+    } else if (rid == 0x21) {
+        s_rid21_count++;
+        s_rid21_last_ms = tms;
+        s_rid21_last_len = (len > 8) ? 8 : len;
+        memcpy(s_rid21_last, d, (size_t)s_rid21_last_len);
+
+        ESP_LOGI(TAG, "RID 0x21: tracked (unknown payload) len=%d", len);
+    }
+
+    taskENTER_CRITICAL(&s_state_mux);
+    update_derived_state(&s_state);
+    taskEXIT_CRITICAL(&s_state_mux);
+    log_nut_style_if_changed();
+}
+
+static void intr_in_cb(usb_transfer_t *t)
+{
+    if (!t) return;
+
+    if (t->status == ESP_OK && t->actual_num_bytes > 0) {
+        const uint8_t *d = (const uint8_t *)t->data_buffer;
+        int len = (int)t->actual_num_bytes;
+
+        bool changed = (len != s_last_in_len) ||
+                       (memcmp(d, s_last_in, (size_t)((len > (int)sizeof(s_last_in)) ? sizeof(s_last_in) : len)) != 0);
+
+        if (changed) {
+            // REVERT[M3-IN-001]: change-only logging
+            s_last_in_len = len;
+            int copy_len = len;
+            if (copy_len > (int)sizeof(s_last_in)) copy_len = (int)sizeof(s_last_in);
+            memcpy(s_last_in, d, (size_t)copy_len);
+
+            // v9: update last report tracking
+            s_last_rid = d[0];
+            s_last_report_ms = now_ms();
+
+            char line[64 * 3 + 1];
+            int pos = 0;
+            for (int i = 0; i < len && i < 64 && pos < (int)sizeof(line) - 4; i++) {
+                pos += snprintf(&line[pos], sizeof(line) - pos, "%02X%s", d[i], (i == len - 1) ? "" : " ");
+            }
+            ESP_LOGI(TAG, "HID IN changed (%d): %s", len, line);
+
+            decode_and_update_state(d, len);
+        }
+    }
+
+    if (!s_dev_gone) {
+        (void)usb_host_transfer_submit(t);
+    } else {
+        usb_host_transfer_free(t);
+    }
+}
+
+static esp_err_t start_interrupt_in_reader(void)
+{
+    if (!s_dev || s_ep_in_addr == 0 || s_ep_in_mps == 0) return ESP_ERR_INVALID_STATE;
+
+    usb_transfer_t *t = NULL;
+    esp_err_t err = usb_host_transfer_alloc(s_ep_in_mps, 0, &t);
+    if (err != ESP_OK || !t) return err;
+
+    t->device_handle = s_dev;
+    t->bEndpointAddress = s_ep_in_addr;
+    t->callback = intr_in_cb;
+    t->context = NULL;
+    t->num_bytes = s_ep_in_mps;
+
+    ESP_LOGI(TAG, "Starting interrupt IN reader: EP=0x%02x MPS=%u (change-only)",
+             (unsigned)s_ep_in_addr, (unsigned)s_ep_in_mps);
+
+    return usb_host_transfer_submit(t);
+}
+
+/* =========================================================
+ * JOB TASK: USB host library event pump
+ * Why: Needed for enumeration/host actions so NEW_DEV events fire.
+ * ========================================================= */
+static void usb_lib_task(void *arg)
+{
+    (void)arg;
+    while (1) {
+        uint32_t flags = 0;
+        esp_err_t err = usb_host_lib_handle_events(portMAX_DELAY, &flags);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "usb_host_lib_handle_events: %s", esp_err_to_name(err));
+        }
+    }
+}
+
+/* =========================================================
+ * JOB TASK: Main USB client task (open device, claim interface, start reader)
+ * ========================================================= */
+static void app_main_usb(void *arg)
+{
+    (void)arg;
+
+    usb_host_config_t host_cfg = {
+        .skip_phy_setup = false,
+        .intr_flags = ESP_INTR_FLAG_LEVEL1,
+    };
+
+    ESP_ERROR_CHECK(usb_host_install(&host_cfg));
+    ESP_LOGI(TAG, "usb_host_install OK");
+
+    // v9 optional: reduce internal USB debug noise (keep our TAG logs readable)
+    esp_log_level_set("USBH", ESP_LOG_WARN);
+    esp_log_level_set("HUB",  ESP_LOG_WARN);
+
+    // Start the library pump (critical for enumeration)
+    xTaskCreatePinnedToCore(usb_lib_task, "usb_lib", 4096, NULL, 20, NULL, 0);
+
+    usb_host_client_config_t client_cfg = {
+        .is_synchronous = false,
+        .max_num_event_msg = 8,
+        .async = {
+            .client_event_callback = client_event_cb,
+            .callback_arg = NULL,
+        },
+    };
+
+    ESP_ERROR_CHECK(usb_host_client_register(&client_cfg, &s_client));
+    ESP_LOGI(TAG, "usb_host_client_register OK");
+
+    ESP_LOGI(TAG, "Ready. Plug UPS into OTG port now (VBUS must be powered).");
+    ESP_LOGI(TAG, "No polling spam: logs will appear only on USB events / changed HID reports.");
+
+    while (1) {
+        (void)usb_host_client_handle_events(s_client, portMAX_DELAY);
+
+        if (s_dev_connected) {
+            s_dev_connected = false;
+
+            if (s_new_dev_addr == 0) {
+                ESP_LOGW(TAG, "NEW_DEV flag set but addr=0? skipping");
+                continue;
+            }
+
+            usb_device_handle_t dev = NULL;
+            esp_err_t err = usb_host_device_open(s_client, s_new_dev_addr, &dev);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "usb_host_device_open(addr=%u) failed: %s",
+                         (unsigned)s_new_dev_addr, esp_err_to_name(err));
+                continue;
+            }
+            s_dev = dev;
+
+            // REVERT[M3-A-002]: get_device_descriptor returns const ptr via ptr-to-ptr
+            const usb_device_desc_t *dev_desc = NULL;
+            err = usb_host_get_device_descriptor(s_dev, &dev_desc);
+            if (err != ESP_OK || !dev_desc) {
+                ESP_LOGE(TAG, "get_device_descriptor failed: %s", esp_err_to_name(err));
+                usb_host_device_close(s_client, s_dev);
+                s_dev = NULL;
+                continue;
+            }
+
+            ESP_LOGI(TAG, "Connected VID:PID=%04x:%04x bDeviceClass=0x%02x EP0_MPS=%u",
+             dd.idVendor, dd.idProduct, dd.bDeviceClass, (unsigned)dd.bMaxPacketSize0);
+
+    if (UPS_FILTER_ENABLE) {
+        if (dd.idVendor != UPS_VID || dd.idProduct != UPS_PID) {
+            ESP_LOGW(TAG, "Device VID:PID=%04x:%04x is not the configured UPS (%04x:%04x); ignoring",
+                     dd.idVendor, dd.idProduct, UPS_VID, UPS_PID);
+            usb_host_device_close(s_dev);
+            s_dev = NULL;
+            return;
+        }
+    }
+
+    const usb_config_desc_t *cfg = NULL;
+            err = usb_host_get_active_config_descriptor(s_dev, &cfg);
+            if (err != ESP_OK || !cfg) {
+                ESP_LOGE(TAG, "get_active_config_descriptor failed: %s", esp_err_to_name(err));
+                usb_host_device_close(s_client, s_dev);
+                s_dev = NULL;
+                continue;
+            }
+
+            ESP_LOGI(TAG, "Active config wTotalLength=%u", (unsigned)cfg->wTotalLength);
+
+            s_hid_intf_num = -1;
+            s_ep_in_addr = 0;
+            s_ep_in_mps = 0;
+            s_hid_report_desc_len = 0;
+
+            bool ok = parse_hid_intf_and_ep((const uint8_t *)cfg, cfg->wTotalLength,
+                                           &s_hid_intf_num, &s_ep_in_addr, &s_ep_in_mps,
+                                           &s_hid_report_desc_len);
+            if (!ok) {
+                ESP_LOGE(TAG, "Failed to locate HID interface/EP/report-len in config descriptor");
+                usb_host_device_close(s_client, s_dev);
+                s_dev = NULL;
+                continue;
+            }
+
+            err = usb_host_interface_claim(s_client, s_dev, s_hid_intf_num, 0);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "Interface claim failed: %s", esp_err_to_name(err));
+                usb_host_device_close(s_client, s_dev);
+                s_dev = NULL;
+                continue;
+            }
+            ESP_LOGI(TAG, "Interface claimed");
+
+            // v8/v9 default: no descriptor dump; can enable via ENABLE_REPORT_DESCRIPTOR_DUMP
+            hid_get_report_descriptor_and_dump_once();
+
+            // Reset milestone state + v9 counters on attach
+            memset(&s_state, 0, sizeof(s_state));
+            memset(&s_state_last_printed, 0, sizeof(s_state_last_printed));
+
+            s_last_rid = 0;
+            s_last_report_ms = 0;
+
+            s_rid06_count = s_rid14_count = s_rid21_count = 0;
+            s_rid06_last_ms = s_rid14_last_ms = s_rid21_last_ms = 0;
+            s_rid06_last_len = s_rid14_last_len = s_rid21_last_len = 0;
+            memset(s_rid06_last, 0, sizeof(s_rid06_last));
+            memset(s_rid14_last, 0, sizeof(s_rid14_last));
+            memset(s_rid21_last, 0, sizeof(s_rid21_last));
+
+            ESP_LOGI(TAG, "Milestone 5/6: state reset on attach.");
+
+            err = start_interrupt_in_reader();
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "start_interrupt_in_reader failed: %s", esp_err_to_name(err));
+            }
+        }
+
+        if (s_dev_gone) {
+            s_dev_gone = false;
+
+            if (s_dev) {
+                if (s_hid_intf_num >= 0) {
+                    (void)usb_host_interface_release(s_client, s_dev, s_hid_intf_num);
+                }
+                (void)usb_host_device_close(s_client, s_dev);
+                s_dev = NULL;
+            }
+
+            s_new_dev_addr = 0;
+            s_hid_intf_num = -1;
+            s_ep_in_addr = 0;
+            s_ep_in_mps = 0;
+            s_hid_report_desc_len = 0;
+            s_last_in_len = -1;
+            memset(s_last_in, 0, sizeof(s_last_in));
+
+            s_last_rid = 0;
+            s_last_report_ms = 0;
+
+            s_rid06_count = s_rid14_count = s_rid21_count = 0;
+            s_rid06_last_ms = s_rid14_last_ms = s_rid21_last_ms = 0;
+            s_rid06_last_len = s_rid14_last_len = s_rid21_last_len = 0;
+            memset(s_rid06_last, 0, sizeof(s_rid06_last));
+            memset(s_rid14_last, 0, sizeof(s_rid14_last));
+            memset(s_rid21_last, 0, sizeof(s_rid21_last));
+
+            memset(&s_state, 0, sizeof(s_state));
+            memset(&s_state_last_printed, 0, sizeof(s_state_last_printed));
+            ESP_LOGI(TAG, "Milestone 5/6: state cleared on detach.");
+        }
+    }
+}
+
+/* =========================================================
+ * Milestone 7 (v12): WiFi STA (LAN mode) + HTTP status endpoint
+ *
+ * Goal:
+ * - Join your existing WiFi/LAN (DHCP) so other NUT systems on your network
+ *   can reach the ESP32 without connecting to a dedicated SoftAP.
+ *
+ * Configure:
+ *   WIFI_STA_SSID / WIFI_STA_PASS below.
+ *
+ * Behavior:
+ * - STA connects to your AP and obtains an IP via DHCP.
+ * - Once an IP is acquired, the HTTP status endpoint and NUT TCP server
+ *   are started and a "try: http://<ip>/status" log is printed.
+ *
+ * Endpoint:
+ *   GET http://<dhcp-ip>/status  -> JSON snapshot (read-only)
+ *   NUT upsd-like TCP: <dhcp-ip>:3493
+ *
+ * Notes:
+ * - If you want to avoid hardcoding credentials, later we can move these into
+ *   Kconfig (menuconfig) or NVS provisioning.
+ * ========================================================= */
+
+#define WIFI_STA_SSID       "YOUR_WIFI_SSID"
+#define WIFI_STA_PASS       "YOUR_WIFI_PASSWORD"   /* set "" for open networks */
+#define WIFI_MAXIMUM_RETRY  10
+
+
+static httpd_handle_t s_http = NULL;
+
+static esp_err_t status_handler(httpd_req_t *req)
+{
+    const char *ups_status = "UNKNOWN";
+    if (s_state.have_ac) {
+        ups_status = s_state.on_battery ? "OB" : "OL";
+    }
+
+    // Best-effort JSON: use 0 when unknown (client can check have_* later once added)
+    char resp[512];
+    int n = snprintf(resp, sizeof(resp),
+        "{"
+        "\"battery_charge\":%u,"
+        "\"battery_runtime\":%" PRIu32 ","
+        "\"ac_present\":%u,"
+        "\"flags\":%" PRIu32 ","
+        "\"ups_status\":\"%s\","
+        "\"rid06_count\":%" PRIu32 ","
+        "\"rid14_count\":%" PRIu32 ","
+        "\"rid21_count\":%" PRIu32 ","
+        "\"last_rid\":%u,"
+        "\"last_report_ms\":%" PRIu32
+        "}",
+        (unsigned)(s_state.have_batt ? s_state.battery_charge_pct : 0),
+        (uint32_t)(s_state.have_runtime ? s_state.battery_runtime_s : 0),
+        (unsigned)(s_state.have_ac ? s_state.ac_present : 0),
+        (uint32_t)(s_state.have_flags ? s_state.flags : 0),
+        ups_status,
+        (uint32_t)s_rid06_count,
+        (uint32_t)s_rid14_count,
+        (uint32_t)s_rid21_count,
+        (unsigned)s_last_rid,
+        (uint32_t)s_last_report_ms
+    );
+    if (n < 0) n = 0;
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+/* =========================================================
+ * Milestone 8 (v11): Minimal NUT (upsd-like) TCP server
+ *
+ * Listens on TCP/3493 and implements a small subset of the upsd protocol:
+ *   - VER
+ *   - LIST UPS
+ *   - LIST VAR <ups>
+ *   - GET VAR <ups> <var>
+ *
+ * Notes:
+ * - Read-only, single-UPS, no auth (LAN only).
+ * - Keep HTTP /status as a debugging backstop.
+ * ========================================================= */
+
+#define NUT_UPS_NAME   "ups"
+#define NUT_UPS_DESC   "ESP32S3 APC UPS (HID)"
+#define NUT_TCP_PORT   3493
+
+static void nut_send_line(int fd, const char *line)
+{
+    if (!line) return;
+    (void)send(fd, line, (int)strlen(line), 0);
+}
+
+static void nut_send_fmt(int fd, const char *fmt, ...)
+{
+    char buf[256];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    (void)send(fd, buf, (int)strlen(buf), 0);
+}
+
+static void nut_send_err(int fd, const char *err)
+{
+    // upsd errors look like: ERR <TOKEN>\n
+    nut_send_fmt(fd, "ERR %s\n", err ? err : "UNKNOWN");
+}
+
+static void nut_snapshot_state(ups_state_t *out, uint32_t *rid06, uint32_t *rid14, uint32_t *rid21)
+{
+    if (!out) return;
+    taskENTER_CRITICAL(&s_state_mux);
+    *out = s_state;
+    taskEXIT_CRITICAL(&s_state_mux);
+    if (rid06) *rid06 = s_rid06_count;
+    if (rid14) *rid14 = s_rid14_count;
+    if (rid21) *rid21 = s_rid21_count;
+}
+
+static const char *nut_status_str(const ups_state_t *st)
+{
+    if (!st) return "UNKNOWN";
+    if (!st->have_ac) return "UNKNOWN";
+    return st->on_battery ? "OB" : "OL";
+}
+
+static void nut_cmd_list_ups(int fd)
+{
+    nut_send_line(fd, "BEGIN LIST UPS\n");
+    nut_send_fmt(fd, "UPS %s \"%s\"\n", NUT_UPS_NAME, NUT_UPS_DESC);
+    nut_send_line(fd, "END LIST UPS\n");
+}
+
+static void nut_cmd_list_var(int fd, const ups_state_t *st)
+{
+    nut_send_fmt(fd, "BEGIN LIST VAR %s\n", NUT_UPS_NAME);
+
+    // Only emit vars we currently know how to produce
+    if (st->have_batt) {
+        nut_send_fmt(fd, "VAR %s battery.charge \"%u\"\n", NUT_UPS_NAME, (unsigned)st->battery_charge_pct);
+    }
+    if (st->have_runtime) {
+        nut_send_fmt(fd, "VAR %s battery.runtime \"%" PRIu32 "\"\n", NUT_UPS_NAME, st->battery_runtime_s);
+    }
+    if (st->have_ac) {
+        nut_send_fmt(fd, "VAR %s input.utility.present \"%u\"\n", NUT_UPS_NAME, (unsigned)st->ac_present);
+    }
+    if (st->have_flags) {
+        nut_send_fmt(fd, "VAR %s ups.flags \"0x%08" PRIX32 "\"\n", NUT_UPS_NAME, st->flags);
+    }
+    // Derived
+    nut_send_fmt(fd, "VAR %s ups.status \"%s\"\n", NUT_UPS_NAME, nut_status_str(st));
+
+    nut_send_fmt(fd, "END LIST VAR %s\n", NUT_UPS_NAME);
+}
+
+static void nut_cmd_get_var(int fd, const ups_state_t *st, const char *var)
+{
+    if (!var || !st) {
+        nut_send_err(fd, "INVALID-ARGUMENT");
+        return;
+    }
+
+    if (strcmp(var, "battery.charge") == 0) {
+        if (!st->have_batt) { nut_send_err(fd, "VAR-NOT-SUPPORTED"); return; }
+        nut_send_fmt(fd, "VAR %s battery.charge \"%u\"\n", NUT_UPS_NAME, (unsigned)st->battery_charge_pct);
+        return;
+    }
+    if (strcmp(var, "battery.runtime") == 0) {
+        if (!st->have_runtime) { nut_send_err(fd, "VAR-NOT-SUPPORTED"); return; }
+        nut_send_fmt(fd, "VAR %s battery.runtime \"%" PRIu32 "\"\n", NUT_UPS_NAME, st->battery_runtime_s);
+        return;
+    }
+    if (strcmp(var, "input.utility.present") == 0) {
+        if (!st->have_ac) { nut_send_err(fd, "VAR-NOT-SUPPORTED"); return; }
+        nut_send_fmt(fd, "VAR %s input.utility.present \"%u\"\n", NUT_UPS_NAME, (unsigned)st->ac_present);
+        return;
+    }
+    if (strcmp(var, "ups.flags") == 0) {
+        if (!st->have_flags) { nut_send_err(fd, "VAR-NOT-SUPPORTED"); return; }
+        nut_send_fmt(fd, "VAR %s ups.flags \"0x%08" PRIX32 "\"\n", NUT_UPS_NAME, st->flags);
+        return;
+    }
+    if (strcmp(var, "ups.status") == 0) {
+        nut_send_fmt(fd, "VAR %s ups.status \"%s\"\n", NUT_UPS_NAME, nut_status_str(st));
+        return;
+    }
+
+    // driver debug vars (not standard, but helpful)
+    if (strcmp(var, "driver.rid06.count") == 0) {
+        nut_send_fmt(fd, "VAR %s driver.rid06.count \"%" PRIu32 "\"\n", NUT_UPS_NAME, (uint32_t)s_rid06_count);
+        return;
+    }
+    if (strcmp(var, "driver.rid14.count") == 0) {
+        nut_send_fmt(fd, "VAR %s driver.rid14.count \"%" PRIu32 "\"\n", NUT_UPS_NAME, (uint32_t)s_rid14_count);
+        return;
+    }
+    if (strcmp(var, "driver.rid21.count") == 0) {
+        nut_send_fmt(fd, "VAR %s driver.rid21.count \"%" PRIu32 "\"\n", NUT_UPS_NAME, (uint32_t)s_rid21_count);
+        return;
+    }
+
+    nut_send_err(fd, "VAR-NOT-SUPPORTED");
+}
+
+static void nut_handle_line(int fd, char *line)
+{
+    // Trim CRLF
+    if (!line) return;
+    for (char *p = line; *p; p++) {
+        if (*p == '\r' || *p == '\n') { *p = 0; break; }
+    }
+    if (line[0] == 0) return;
+
+    // Tokenize
+    char *save = NULL;
+    char *cmd = strtok_r(line, " \t", &save);
+    if (!cmd) return;
+
+    ups_state_t st;
+    nut_snapshot_state(&st, NULL, NULL, NULL);
+
+    if (strcmp(cmd, "VER") == 0) {
+        nut_send_line(fd, "Network UPS Tools upsd-esp32 0.1\n");
+        return;
+    }
+    if (strcmp(cmd, "LIST") == 0) {
+        char *what = strtok_r(NULL, " \t", &save);
+        if (!what) { nut_send_err(fd, "INVALID-ARGUMENT"); return; }
+        if (strcmp(what, "UPS") == 0) {
+            nut_cmd_list_ups(fd);
+            return;
+        }
+        if (strcmp(what, "VAR") == 0) {
+            char *ups = strtok_r(NULL, " \t", &save);
+            if (!ups) { nut_send_err(fd, "INVALID-ARGUMENT"); return; }
+            if (strcmp(ups, NUT_UPS_NAME) != 0) { nut_send_err(fd, "UNKNOWN-UPS"); return; }
+            nut_cmd_list_var(fd, &st);
+            return;
+        }
+        nut_send_err(fd, "INVALID-ARGUMENT");
+        return;
+    }
+    if (strcmp(cmd, "GET") == 0) {
+        char *what = strtok_r(NULL, " \t", &save);
+        if (!what || strcmp(what, "VAR") != 0) { nut_send_err(fd, "INVALID-ARGUMENT"); return; }
+        char *ups = strtok_r(NULL, " \t", &save);
+        char *var = strtok_r(NULL, " \t", &save);
+        if (!ups || !var) { nut_send_err(fd, "INVALID-ARGUMENT"); return; }
+        if (strcmp(ups, NUT_UPS_NAME) != 0) { nut_send_err(fd, "UNKNOWN-UPS"); return; }
+        nut_cmd_get_var(fd, &st, var);
+        return;
+    }
+
+    // Ignore/deny everything else for now
+    nut_send_err(fd, "INVALID-COMMAND");
+}
+
+static void nut_server_task(void *arg)
+{
+    (void)arg;
+
+    int listen_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+    if (listen_fd < 0) {
+        ESP_LOGE(TAG, "NUT socket() failed");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    int yes = 1;
+    (void)setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+
+    struct sockaddr_in addr = { 0 };
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(NUT_TCP_PORT);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+    if (bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        ESP_LOGE(TAG, "NUT bind() failed");
+        close(listen_fd);
+        vTaskDelete(NULL);
+        return;
+    }
+    if (listen(listen_fd, 1) != 0) {
+        ESP_LOGE(TAG, "NUT listen() failed");
+        close(listen_fd);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    ESP_LOGI(TAG, "NUT server listening on tcp/%d (try: telnet 192.168.4.1 %d)", NUT_TCP_PORT, NUT_TCP_PORT);
+
+    while (1) {
+        struct sockaddr_in6 source_addr;
+        socklen_t addr_len = sizeof(source_addr);
+        int fd = accept(listen_fd, (struct sockaddr *)&source_addr, &addr_len);
+        if (fd < 0) {
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
+
+        // Read lines until disconnect
+        char rx[256];
+        int used = 0;
+        while (1) {
+            int n = recv(fd, rx + used, (int)sizeof(rx) - 1 - used, 0);
+            if (n <= 0) break;
+            used += n;
+            rx[used] = 0;
+
+            // Process complete lines
+            char *start = rx;
+            while (1) {
+                char *nl = strchr(start, '\n');
+                if (!nl) break;
+                *nl = 0;
+                char linebuf[256];
+                snprintf(linebuf, sizeof(linebuf), "%s", start);
+                nut_handle_line(fd, linebuf);
+                start = nl + 1;
+            }
+
+            // Move partial remainder to front
+            int rem = (int)strlen(start);
+            if (rem > 0 && start != rx) memmove(rx, start, (size_t)rem + 1);
+            used = rem;
+        }
+
+        close(fd);
+    }
+}
+
+static void start_nut_server(void)
+{
+    // Keep priority low; USB must remain responsive
+    xTaskCreatePinnedToCore(nut_server_task, "nut3493", 4096, NULL, 3, NULL, 1);
+}
+
+static void start_http_server(void)
+{
+    if (s_http) return;
+
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    // keep it lightweight
+    config.stack_size = 4096;
+    config.task_priority = 4;
+
+    esp_err_t err = httpd_start(&s_http, &config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "HTTP server start failed: %s", esp_err_to_name(err));
+        s_http = NULL;
+        return;
+    }
+
+    httpd_uri_t uri_status = {
+        .uri = "/status",
+        .method = HTTP_GET,
+        .handler = status_handler,
+        .user_ctx = NULL
+    };
+    httpd_register_uri_handler(s_http, &uri_status);
+    ESP_LOGI(TAG, "HTTP server started (see WiFi IP log for URL)");
+}
+
+static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
+{
+    (void)arg;
+
+    if (event_base == WIFI_EVENT) {
+        switch (event_id) {
+        case WIFI_EVENT_STA_START:
+            esp_wifi_connect();
+            break;
+
+        case WIFI_EVENT_STA_DISCONNECTED: {
+            const wifi_event_sta_disconnected_t *disc = (const wifi_event_sta_disconnected_t *)event_data;
+
+            ESP_LOGW(TAG, "WiFi disconnected (reason=%d).", disc ? disc->reason : -1);
+
+            if (s_wifi_retry_num < WIFI_MAXIMUM_RETRY) {
+                s_wifi_retry_num++;
+                ESP_LOGI(TAG, "Retrying WiFi connect (%d/%d)...", s_wifi_retry_num, WIFI_MAXIMUM_RETRY);
+                esp_wifi_connect();
+            } else {
+                xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+                ESP_LOGE(TAG, "WiFi connect failed after %d retries.", WIFI_MAXIMUM_RETRY);
+            }
+            break;
+        }
+
+        default:
+            break;
+        }
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        const ip_event_got_ip_t *event = (const ip_event_got_ip_t *)event_data;
+        s_wifi_retry_num = 0;
+
+        if (event) {
+            snprintf(s_sta_ip_str, sizeof(s_sta_ip_str), IPSTR, IP2STR(&event->ip_info.ip));
+        } else {
+            strlcpy(s_sta_ip_str, "0.0.0.0", sizeof(s_sta_ip_str));
+        }
+
+        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+
+        ESP_LOGI(TAG, "WiFi STA got IP: %s", s_sta_ip_str);
+
+        // Start services once IP is acquired (binds to INADDR_ANY but we log the correct IP).
+        if (!s_net_services_started) {
+            start_http_server();
+            start_nut_server();
+
+            ESP_LOGI(TAG, "HTTP server: GET http://%s/status", s_sta_ip_str);
+            ESP_LOGI(TAG, "NUT server: tcp://%s:3493 (try: ncat %s 3493)", s_sta_ip_str, s_sta_ip_str);
+
+            s_net_services_started = true;
+        }
+    }
+}
+
+static void wifi_init_sta(void)
+{
+    // NVS is required by WiFi
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ESP_ERROR_CHECK(nvs_flash_init());
+    } else {
+        ESP_ERROR_CHECK(err);
+    }
+
+    s_wifi_event_group = xEventGroupCreate();
+    if (!s_wifi_event_group) {
+        ESP_LOGE(TAG, "Failed to create WiFi event group");
+        return;
+    }
+
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    esp_netif_create_default_wifi_sta();
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    esp_event_handler_instance_t instance_any_id = NULL;
+    esp_event_handler_instance_t instance_got_ip = NULL;
+
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
+                                                        &wifi_event_handler, NULL, &instance_any_id));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                                        &wifi_event_handler, NULL, &instance_got_ip));
+
+    wifi_config_t wifi_config = { 0 };
+    strlcpy((char *)wifi_config.sta.ssid, WIFI_STA_SSID, sizeof(wifi_config.sta.ssid));
+    strlcpy((char *)wifi_config.sta.password, WIFI_STA_PASS, sizeof(wifi_config.sta.password));
+
+    // Accept any authmode >= OPEN (so WPA/WPA2/WPA3 also work).
+    wifi_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
+    wifi_config.sta.pmf_cfg.capable = true;
+    wifi_config.sta.pmf_cfg.required = false;
+
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    ESP_LOGI(TAG, "WiFi STA started. Connecting to SSID=\"%s\" (DHCP)...", WIFI_STA_SSID);
+}
+
+
+
+void app_main(void)
+{
+    ESP_LOGI(TAG, "=======================================");
+    ESP_LOGI(TAG, "Milestone 3: HID report monitor (change-only)");
+    ESP_LOGI(TAG, "Milestone 4: decode (0x0C batt/runtime, 0x13 AC, 0x16 flags)");
+    ESP_LOGI(TAG, "Milestone 5: state + NUT-ish status logs");
+    ESP_LOGI(TAG, "Milestone 6: track 0x06/0x14/0x21 + counters + freshness");
+    ESP_LOGI(TAG, "Milestone 7: WiFi STA (LAN) + HTTP /status JSON");
+    ESP_LOGI(TAG, "Milestone 8: NUT TCP server (upsd-like) port 3493");
+    ESP_LOGI(TAG, "ESP-IDF %s", IDF_VER);
+    ESP_LOGI(TAG, "main.c CURRENT VERSION: v12");
+    ESP_LOGI(TAG, "=======================================");
+
+    wifi_init_sta();
+
+    xTaskCreatePinnedToCore(app_main_usb, "app_main_usb", 8192, NULL, 10, NULL, 0);
+}
+
+/* =========================================================
+ * NEXT STEPS
+ *
+ * v12 (LAN mode / Milestone 7)
+ * - [ ] Set WIFI_STA_SSID / WIFI_STA_PASS for your LAN WiFi (DHCP) and flash
+ * - [ ] Confirm ESP32 gets a DHCP lease on your LAN (e.g. 10.0.0.x)
+ * - [ ] Validate: GET http://<dhcp-ip>/status
+ * - [ ] Validate: ncat <dhcp-ip> 3493  (VER / LIST UPS / LIST VAR ups / GET VAR ...)
+ * - [ ] Confirm USB detach/reattach does not break NUT/HTTP responsiveness
+ *
+ * v13 (Milestone 8)
+ * - [ ] Optional mDNS name (e.g. upsd-esp32.local) and print the mDNS hostname in logs
+ * - [ ] Optional config via NVS (store SSID/pass, device name, enable/disable HTTP)
+ *
+ * v14 (Milestone 9)
+ * - [ ] Expand NUT protocol coverage as required by common clients (upsc / upsmon)
+ * - [ ] Implement HELP/LIST CMD/INSTCMD skeleton (even if returns ERR for most)
+ * - [ ] Add rate limiting, max clients, and stricter line parsing (defensive)
+ *
+ * End of file
+ * ========================================================= 
+*/

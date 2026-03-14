@@ -1,0 +1,114 @@
+ESP32-S3 + APC UPS (USB HID) — Progress Summary (Current: v8 SUCCESS)
+Date: 2026-03-05 (America/New_York)
+
+Purpose
+- Build a small ESP32-S3 “NUT node” that connects to an APC UPS over USB OTG (HID) and exposes UPS status over LAN.
+- Current focus: prove reliable USB host enumeration + HID interrupt IN decoding; then build a clean status/state model; then add network services.
+
+Hardware (confirmed stable)
+- ESP32-S3 board with USB OTG used as host to APC UPS.
+- Second USB port provides power; OTG VBUS powered via soldered USB->OTG wiring on rear of board.
+- Hardware/cables/soldering unchanged across tests; earlier tests confirmed UPS transitions (load → on-battery), so hardware is not the issue.
+
+Environment
+- ESP-IDF v5.3.1-dirty (Windows host, idf.py monitor on COM3).
+- Target UPS: APC UPS VID:PID 051d:0002.
+- Observed USB: FULL speed; EP0 MPS 64; HID interrupt IN endpoint 0x81 MPS 8.
+
+What is Working Now (v8 — SUCCESS)
+1) USB host lifecycle is reliable
+- usb_host_install OK
+- usb_host_client_register OK
+- NEW_DEV events received; device opens correctly; DEV_GONE handled.
+- Re-plugging UPS works repeatedly; state resets on attach and clears on detach.
+
+2) Descriptor parsing (from active config descriptor) is reliable
+- Active config wTotalLength=34
+- HID interface located: intf=0 alt=0 subclass=0x00 proto=0x00
+- HID report descriptor length parsed from HID descriptor (0x21): 1049 bytes
+- Interrupt IN EP located: 0x81, MPS=8
+- Interface claim succeeds.
+
+3) Interrupt IN streaming (change-only logging) is stable
+- Reports arrive repeatedly with minimal log spam (only on change).
+- Observed repeating report IDs: 0x06, 0x0C, 0x13, 0x14, 0x16, 0x21.
+
+4) Decoding implemented (Milestone 4) — verified by logs
+- Report ID 0x0C: battery charge + runtime (little-endian runtime seconds)
+  Example: batt=98%, runtime=35280 s
+- Report ID 0x13: AC present flag
+  Example: AC_present=1
+- Report ID 0x16: 32-bit flags (little-endian)
+  Example: flags=0x0000000D
+
+5) State + NUT-ish status logs (Milestone 5) — verified by logs
+- State resets on attach (“Milestone 5: state reset on attach.”)
+- State clears on detach (“Milestone 5: state cleared on detach.”)
+- A “NUT-ish status” block prints when key decoded fields arrive/refresh:
+  - battery.charge
+  - battery.runtime
+  - input.utility.present (derived from AC_present when known)
+  - ups.flags (when known)
+  - ups.status: currently conservative:
+    - OL when AC_present=1
+    - UNKNOWN before AC report arrives
+
+Key Evidence from v8 Monitor Logs
+- NEW_DEV → Connected VID:PID=051d:0002 → parse config → claim interface
+- Interrupt IN reports:
+  - 0x0C decoded to batt=98% runtime=35280s
+  - 0x13 decoded to AC_present=1 → ups.status becomes OL
+  - 0x16 decoded to flags=0x0000000D
+- DEV_GONE received and handled; subsequent re-attach repeats success.
+
+Known Issue / De-prioritized (v7 only)
+- v7 attempted a control GET_DESCRIPTOR(report) dump and got:
+  - control submit failed: ESP_ERR_INVALID_ARG
+- This does NOT affect interrupt IN reading and is not required for progress (descriptor length is already parsed from config 0x21).
+- v8 avoids this path and is stable.
+
+Current “Success Criteria” Met
+- Enumerate APC UPS reliably on every plug-in.
+- Claim HID interface 0.
+- Stream interrupt IN packets continuously.
+- Decode at least batt%, runtime, AC present, flags.
+- Maintain a basic state model that survives detach/reattach.
+
+Planned Roadmap (Next Steps)
+Version 9 (Milestone 6): polish + extend decoding, keep USB-only
+- Reduce ESP-IDF internal USB debug noise in code (optional convenience):
+  - esp_log_level_set("USBH", ESP_LOG_WARN);
+  - esp_log_level_set("HUB",  ESP_LOG_WARN);
+- Decode or at least label/log the remaining common report IDs:
+  - 0x06 (likely heartbeat/status tuple) — log as structured fields
+  - 0x14 (unknown) — log raw with stable formatting
+  - 0x21 (unknown) — log raw with stable formatting
+- Improve ups.status composition (still conservative):
+  - AC_present==1 → include “OL”
+  - AC_present==0 → include “OB”
+  - Keep flags raw but also print bit breakdown to help mapping later
+- Maintain “change-only” logging and clean attach/detach behavior.
+
+Version 10 (Milestone 7): add LAN access (web/JSON) + configuration
+- Add a small HTTP server on LAN for:
+  - Device name/label (e.g., “UPSMedical@IP” style)
+  - Username/password protection
+  - Simple status endpoint (JSON) reflecting the internal state model
+  - Basic configuration page (minimal, beginner-friendly)
+- Keep code read-only workflow: assistant suggests edits; user applies.
+
+Later Milestones (after network basics)
+- Broader NUT compatibility:
+  - Map more HID fields to NUT variables
+  - Implement a stable “driver-like” data model
+  - Optional: support scanning/handling additional APC models (USB scan) within resource limits
+
+Operating Notes / Constraints
+- VBUS must be powered for OTG host mode.
+- Change-only logging is preferred (no “waiting for attach” polling spam).
+- Focus on reliability and correctness before adding features like web UI.
+
+Revision Tracking
+- main.c CURRENT VERSION: v8 (SUCCESS)
+- v8 includes: Milestone 3 (HID monitor), Milestone 4 (decode 0x0C/0x13/0x16), Milestone 5 (state + NUT-ish logs)
+- REVERT tags remain in code for reproducibility of prior fixes (IDF v5.3.1 API differences, endpoint direction, transfer types, etc.)

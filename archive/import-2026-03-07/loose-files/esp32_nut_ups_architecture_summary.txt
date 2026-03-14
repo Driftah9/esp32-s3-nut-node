@@ -1,0 +1,117 @@
+ESP32-S3 + APC UPS + NUT Distributed Monitoring Architecture
+
+Project Goal
+
+Create a distributed UPS monitoring system where ESP32-S3 nodes read APC
+UPS units via USB HID and expose them as NUT-compatible servers on the
+LAN. A central Orange Pi Zero 2W server aggregates all UPS devices and
+provides a single monitoring point for Home Assistant, alerts, and
+shutdown orchestration.
+
+Network Overview
+
+LAN subnet: 10.0.0.x
+
+Central NUT Server: Device: Orange Pi Zero 2W (4GB RAM) Static IP:
+10.0.0.6 Role: - Aggregates all ESP32 UPS nodes - Runs NUT server
+(upsd) - Handles monitoring and alerting - Coordinates staged shutdown
+procedures
+
+ESP32 UPS Nodes
+
+Hardware: Board: ESP32-S3 (16MB Flash, 8MB PSRAM) Connection to UPS: USB
+HID via RJ50 → USB cable USB OTG VBUS enabled using solder bridge Power
+supplied through the UART USB-C port
+
+Each ESP32 performs: 1. USB HID communication with APC UPS 2. Polling
+UPS telemetry every ~1 second 3. Hosting a lightweight NUT-compatible
+server (TCP 3493) 4. Providing a local configuration web interface 5.
+Authenticating NUT clients via username/password
+
+ESP32 Web Interface
+
+Accessible locally via browser.
+
+Configurable settings: - UPS name (NUT identifier) - WiFi
+configuration - NUT username - NUT password (stored hashed) - Poll
+interval (optional) - Save settings - Save + Reboot option
+
+Status page displays: - UPS connection status - Battery charge - Runtime
+remaining - UPS load - Input voltage - Last update timestamp
+
+ESP32 NUT Server Features
+
+Port: 3493
+
+Supported commands: - VER - LIST UPS - LIST VAR  - GET VAR  - USERNAME -
+PASSWORD - QUIT
+
+Authentication: - Required for variable access - Credentials stored
+securely in NVS
+
+Variables exposed: device.mfr device.model device.serial ups.status
+ups.load battery.charge battery.runtime input.voltage
+
+Orange Pi Central NUT Server
+
+Runs standard NUT services.
+
+Configuration uses netclient driver to connect to ESP nodes.
+
+Example /etc/nut/ups.conf:
+
+[medicalups] driver = netclient port = 10.0.0.55 upsname = medicalups
+desc = “Medical UPS (ESP32 Node)”
+
+[corenet] driver = netclient port = 10.0.0.56 upsname = corenet desc =
+“Core Network UPS (ESP32 Node)”
+
+Home Assistant Integration
+
+Home Assistant connects only to the Orange Pi NUT server.
+
+Benefits: - Single integration point - Simplified configuration - Access
+to all UPS sensors - Automation capability
+
+Example uses: - Critical alerts for medical UPS - Notification when
+battery runtime falls below threshold - Replace battery alerts - Long
+outage detection
+
+Shutdown Strategy (Future Phase)
+
+Orange Pi orchestrates shutdown using NUT events.
+
+Typical sequence:
+
+1)  Utility power loss (ONBATT event)
+    -   Wait 60–120 seconds to avoid power blips
+2)  If still on battery
+    -   Gracefully shut down non-critical VMs
+3)  Extended outage
+    -   Shut down remaining VMs
+4)  LOWBATT condition
+    -   Shut down Proxmox host
+5)  Orange Pi shuts down last if necessary
+
+Shutdown commands will be executed via SSH using key authentication.
+
+Example actions: qm shutdown shutdown -h now
+
+Advantages of the Architecture
+
+-   No NUT clients required on every system
+-   Centralized monitoring and automation
+-   Modular distributed UPS sensors
+-   Easy expansion (add new ESP nodes)
+-   Native compatibility with NUT ecosystem
+-   Works with Home Assistant and monitoring tools
+
+Future Expansion Possibilities
+
+-   Multiple UPS per ESP32 (if USB hub added)
+-   Historical logging (InfluxDB / Grafana)
+-   MQTT telemetry option
+-   Automatic device discovery
+-   Remote firmware update capability
+
+End of Design Summary

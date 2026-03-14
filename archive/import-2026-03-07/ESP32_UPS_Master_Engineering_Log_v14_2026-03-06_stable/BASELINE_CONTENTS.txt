@@ -1,0 +1,9 @@
+Archive: ESP32_UPS_Master_Engineering_Log_v14_2026-03-06_stable.zip
+Engineering log: ESP32_UPS_Master_Engineering_Log_v14_2026-03-06_stable.md
+Status: stable
+Date: 2026-03-06
+
+This archive contains:
+- updated engineering log
+- working baseline source files in main/
+- README/supporting baseline files from prior working package

@@ -1,0 +1,829 @@
+// main.c - ESP32-S3 NUT Node (v14 rebuild from last stable baseline v13.6)
+// Goals in this rebuild:
+//  - Keep known-good Wi-Fi AP-first + config portal flow (no baked-in STA creds)
+//  - Replace esp_http_server (which hit 431 "Header fields are too long" with modern browsers)
+//    with a tiny raw-socket HTTP server that ignores/doesn't store large request headers.
+//  - Keep NUT/upsd TCP/3493 plaintext server and be tolerant of common client probes,
+//    explicitly refusing STARTTLS without breaking plaintext.
+//
+// ESP-IDF: tested target is esp-idf v5.3.1
+//
+// Drop-in file: replace your project's main/main.c with this file.
+//
+// NOTE: USB/HID autodiscovery is still a work-in-progress in this scaffold. The NUT server
+// exposes a minimal set of variables (battery.charge, battery.runtime, input.utility.present,
+// ups.flags, ups.status) so NUT clients can validate connectivity while USB work continues.
+
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <ctype.h>
+#include <stdarg.h>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/event_groups.h"
+
+#include "esp_log.h"
+#include "esp_err.h"
+#include "esp_system.h"
+#include "esp_event.h"
+#include "esp_netif.h"
+#include "esp_mac.h"
+
+#include "nvs.h"
+#include "nvs_flash.h"
+
+#include "esp_wifi.h"
+
+#include "lwip/inet.h"
+#include "lwip/sockets.h"
+#include "lwip/netdb.h"
+
+static const char *TAG = "UPS_USB_M3";
+
+// ==========================
+// Config (stored in NVS)
+// ==========================
+#define NVS_NS_CFG "cfg"
+
+// SoftAP defaults (generated per-device; password optional)
+#define SOFTAP_IP_STR          "192.168.4.1"
+#define SOFTAP_NETMASK_STR     "255.255.255.0"
+#define SOFTAP_GW_STR          "192.168.4.1"
+
+#define DEFAULT_SOFTAP_CH      6
+#define DEFAULT_SOFTAP_MAXCONN 4
+
+// NUT server
+#define NUT_TCP_PORT 3493
+
+// HTTP config portal
+#define HTTP_PORT 80
+#define HTTP_RX_MAX 8192   // large enough for modern browser headers + small POST body
+#define HTTP_BODY_MAX 2048 // config form payload stays small
+
+// STA connect test
+#define STA_TEST_TIMEOUT_MS 15000
+
+typedef struct {
+    char sta_ssid[33];
+    char sta_pass[65];
+
+    char ap_ssid[33];
+    char ap_pass[65]; // empty -> open auth
+
+    char ups_name[33];
+    char nut_user[33];
+    char nut_pass[33];
+} app_cfg_t;
+
+static app_cfg_t g_cfg;
+
+// Event bits
+static EventGroupHandle_t wifi_event_group;
+#define WIFI_STA_GOT_IP_BIT BIT0
+
+static esp_netif_t *s_ap_netif = NULL;
+static esp_netif_t *s_sta_netif = NULL;
+
+// ==========================
+// Small helpers
+// ==========================
+static void strlcpy0(char *dst, const char *src, size_t dstsz) {
+    if (!dst || dstsz == 0) return;
+    if (!src) { dst[0] = 0; return; }
+    strlcpy(dst, src, dstsz);
+}
+
+static bool is_printable_ascii(const char *s) {
+    if (!s) return false;
+    for (; *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c < 0x20 || c > 0x7e) return false;
+    }
+    return true;
+}
+
+static void url_decode_inplace(char *s) {
+    // application/x-www-form-urlencoded decode: + -> space, %HH -> byte
+    char *w = s;
+    for (char *r = s; *r; r++) {
+        if (*r == '+') {
+            *w++ = ' ';
+        } else if (*r == '%' && isxdigit((unsigned char)r[1]) && isxdigit((unsigned char)r[2])) {
+            char hh[3] = { r[1], r[2], 0 };
+            *w++ = (char)strtol(hh, NULL, 16);
+            r += 2;
+        } else {
+            *w++ = *r;
+        }
+    }
+    *w = 0;
+}
+
+static void trim_ws(char *s) {
+    if (!s) return;
+    // left
+    char *p = s;
+    while (*p && isspace((unsigned char)*p)) p++;
+    if (p != s) memmove(s, p, strlen(p) + 1);
+    // right
+    size_t n = strlen(s);
+    while (n > 0 && isspace((unsigned char)s[n - 1])) s[--n] = 0;
+}
+
+static const char *sta_ip_str(char out[16]) {
+    out[0] = 0;
+    if (!s_sta_netif) return out;
+    esp_netif_ip_info_t ip;
+    if (esp_netif_get_ip_info(s_sta_netif, &ip) != ESP_OK) return out;
+    inet_ntoa_r(ip.ip, out, 16);
+    return out;
+}
+
+// ==========================
+// NVS config load/save
+// ==========================
+static esp_err_t cfg_load(app_cfg_t *cfg) {
+    memset(cfg, 0, sizeof(*cfg));
+    // defaults
+    // AP SSID defaults to ESP32-UPS-SETUP-<MAC> in app_main()
+    strlcpy0(cfg->ups_name, "ups", sizeof(cfg->ups_name));
+    strlcpy0(cfg->nut_user, "admin", sizeof(cfg->nut_user));
+    strlcpy0(cfg->nut_pass, "admin", sizeof(cfg->nut_pass));
+
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NS_CFG, NVS_READONLY, &h);
+    if (err != ESP_OK) return err;
+
+    size_t len = sizeof(*cfg);
+    err = nvs_get_blob(h, "cfg", cfg, &len);
+    nvs_close(h);
+    return err;
+}
+
+static esp_err_t cfg_save(const app_cfg_t *cfg) {
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NS_CFG, NVS_READWRITE, &h);
+    if (err != ESP_OK) return err;
+    err = nvs_set_blob(h, "cfg", cfg, sizeof(*cfg));
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    return err;
+}
+
+// ==========================
+// Wi-Fi event handling
+// ==========================
+static void wifi_event_router(void *arg, esp_event_base_t base, int32_t id, void *data) {
+    (void)arg;
+
+    if (base == WIFI_EVENT) {
+        if (id == WIFI_EVENT_STA_START) {
+            if (g_cfg.sta_ssid[0]) {
+                ESP_LOGI(TAG, "STA start: connecting to '%s'...", g_cfg.sta_ssid);
+                esp_wifi_connect();
+            } else {
+                ESP_LOGI(TAG, "STA start: no STA creds yet (configure via SoftAP).");
+            }
+        } else if (id == WIFI_EVENT_STA_DISCONNECTED) {
+            xEventGroupClearBits(wifi_event_group, WIFI_STA_GOT_IP_BIT);
+            ESP_LOGW(TAG, "STA disconnected.");
+        } else if (id == WIFI_EVENT_AP_START) {
+            ESP_LOGI(TAG, "SoftAP started (config portal).");
+        }
+    } else if (base == IP_EVENT) {
+        if (id == IP_EVENT_STA_GOT_IP) {
+            ip_event_got_ip_t *e = (ip_event_got_ip_t *)data;
+            char ip[16];
+            inet_ntoa_r(e->ip_info.ip, ip, sizeof(ip));
+            ESP_LOGI(TAG, "STA got IP: %s", ip);
+            xEventGroupSetBits(wifi_event_group, WIFI_STA_GOT_IP_BIT);
+        }
+    }
+}
+
+// ==========================
+// Wi-Fi init: AP+STA (AP always available)
+// ==========================
+static void make_default_ap_ssid(char out[33]) {
+    uint8_t mac[6] = {0};
+    esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
+    snprintf(out, 33, "ESP32-UPS-SETUP-%02X%02X%02X", mac[3], mac[4], mac[5]);
+}
+
+static void wifi_init_apsta(void) {
+    wifi_event_group = xEventGroupCreate();
+
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    // Create netifs
+    s_sta_netif = esp_netif_create_default_wifi_sta();
+    s_ap_netif  = esp_netif_create_default_wifi_ap();
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_router, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_router, NULL, NULL));
+
+    // Wi-Fi mode
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+
+    // AP config
+    wifi_config_t ap_cfg = {0};
+    strlcpy0((char*)ap_cfg.ap.ssid, g_cfg.ap_ssid, sizeof(ap_cfg.ap.ssid));
+    ap_cfg.ap.ssid_len = (uint8_t)strlen((char*)ap_cfg.ap.ssid);
+    ap_cfg.ap.channel = DEFAULT_SOFTAP_CH;
+    ap_cfg.ap.max_connection = DEFAULT_SOFTAP_MAXCONN;
+
+    bool ap_has_pass = (g_cfg.ap_pass[0] != 0);
+    if (ap_has_pass) {
+        // WPA2 requires >= 8 chars
+        if (strlen(g_cfg.ap_pass) < 8) {
+            ESP_LOGW(TAG, "SoftAP password too short (<8); falling back to open AP.");
+            ap_has_pass = false;
+        }
+    }
+    if (ap_has_pass) {
+        strlcpy0((char*)ap_cfg.ap.password, g_cfg.ap_pass, sizeof(ap_cfg.ap.password));
+        ap_cfg.ap.authmode = WIFI_AUTH_WPA2_PSK;
+    } else {
+        ap_cfg.ap.password[0] = 0;
+        ap_cfg.ap.authmode = WIFI_AUTH_OPEN;
+    }
+
+    // STA config (no default creds; only apply if present)
+    wifi_config_t sta_cfg = {0};
+    if (g_cfg.sta_ssid[0]) {
+        strlcpy0((char*)sta_cfg.sta.ssid, g_cfg.sta_ssid, sizeof(sta_cfg.sta.ssid));
+        strlcpy0((char*)sta_cfg.sta.password, g_cfg.sta_pass, sizeof(sta_cfg.sta.password));
+        sta_cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK; // allow WPA2+; WPA3 handled by IDF
+    }
+
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
+
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    ESP_LOGI(TAG, "SoftAP ready: connect to SSID '%s' then open http://%s/config", g_cfg.ap_ssid, SOFTAP_IP_STR);
+}
+
+// Attempt STA connect using current g_cfg (non-blocking connect happens via STA_START handler)
+// This function triggers a reconnect and waits for GOT_IP bit.
+static bool sta_connect_test(void) {
+    if (!g_cfg.sta_ssid[0]) return false;
+
+    xEventGroupClearBits(wifi_event_group, WIFI_STA_GOT_IP_BIT);
+
+    wifi_config_t sta_cfg = {0};
+    strlcpy0((char*)sta_cfg.sta.ssid, g_cfg.sta_ssid, sizeof(sta_cfg.sta.ssid));
+    strlcpy0((char*)sta_cfg.sta.password, g_cfg.sta_pass, sizeof(sta_cfg.sta.password));
+
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
+    esp_wifi_disconnect();
+    esp_wifi_connect();
+
+    EventBits_t bits = xEventGroupWaitBits(
+        wifi_event_group,
+        WIFI_STA_GOT_IP_BIT,
+        pdFALSE,
+        pdTRUE,
+        pdMS_TO_TICKS(STA_TEST_TIMEOUT_MS)
+    );
+    return (bits & WIFI_STA_GOT_IP_BIT) != 0;
+}
+
+// ==========================
+// Raw-socket HTTP server
+// ==========================
+static int sock_read_until(int fd, char *buf, int buflen, const char *needle) {
+    // read until needle appears or buffer full; returns bytes read
+    int total = 0;
+    int nlen = (int)strlen(needle);
+    while (total < buflen - 1) {
+        int r = recv(fd, buf + total, buflen - 1 - total, 0);
+        if (r <= 0) break;
+        total += r;
+        buf[total] = 0;
+        if (total >= nlen && strstr(buf, needle)) break;
+    }
+    return total;
+}
+
+static void http_send(int fd, const char *status, const char *ctype, const char *body) {
+    char hdr[256];
+    int blen = body ? (int)strlen(body) : 0;
+    int hlen = snprintf(hdr, sizeof(hdr),
+        "HTTP/1.1 %s\r\n"
+        "Connection: close\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Length: %d\r\n"
+        "\r\n",
+        status, ctype, blen
+    );
+    send(fd, hdr, hlen, 0);
+    if (body && blen) send(fd, body, blen, 0);
+}
+
+static void http_send_redirect(int fd, const char *location) {
+    char hdr[256];
+    int hlen = snprintf(hdr, sizeof(hdr),
+        "HTTP/1.1 303 See Other\r\n"
+        "Connection: close\r\n"
+        "Location: %s\r\n"
+        "Content-Length: 0\r\n"
+        "\r\n",
+        location
+    );
+    send(fd, hdr, hlen, 0);
+}
+
+static void http_send_404(int fd) {
+    http_send(fd, "404 Not Found", "text/plain", "404 Not Found");
+}
+
+static void http_send_400(int fd, const char *msg) {
+    http_send(fd, "400 Bad Request", "text/plain", msg ? msg : "400 Bad Request");
+}
+
+static void http_send_200_html(int fd, const char *html) {
+    http_send(fd, "200 OK", "text/html; charset=utf-8", html ? html : "");
+}
+
+static void http_send_200_json(int fd, const char *json) {
+    http_send(fd, "200 OK", "application/json", json ? json : "{}");
+}
+
+static void render_config_page(char *out, size_t outsz, const char *note) {
+    char ip[16]; sta_ip_str(ip);
+    if (!note) note = "";
+
+    // IMPORTANT: keep HTML simple; modern browsers send big headers anyway, but we now ignore them.
+    snprintf(out, outsz,
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>ESP32 UPS</title></head><body>"
+        "<h2>ESP32 UPS NUT Node</h2>"
+        "<p><b>SoftAP:</b> %s</p>"
+        "<p><b>STA IP:</b> %s</p>"
+        "<p style='color:#b00;'>%s</p>"
+        "<form method='POST' action='/save'>"
+        "<h3>Join Local Wi-Fi (STA)</h3>"
+        "SSID:<br><input name='sta_ssid' maxlength='32' value='%s'><br>"
+        "Password:<br><input name='sta_pass' maxlength='64' value='%s' type='password'><br>"
+        "<h3>SoftAP (Setup Portal)</h3>"
+        "AP SSID:<br><input name='ap_ssid' maxlength='32' value='%s'><br>"
+        "AP Password (8+ chars, blank=open):<br><input name='ap_pass' maxlength='64' value='%s' type='password'><br>"
+        "<h3>NUT Identity</h3>"
+        "UPS Name:<br><input name='ups_name' maxlength='32' value='%s'><br>"
+        "NUT Username:<br><input name='nut_user' maxlength='32' value='%s'><br>"
+        "NUT Password:<br><input name='nut_pass' maxlength='32' value='%s' type='password'><br><br>"
+        "<button type='submit' name='action' value='save_test'>Save + Test STA Connect</button> "
+        "<button type='submit' name='action' value='save_only'>Save Only</button>"
+        "</form>"
+        "<p><a href='/status'>/status</a> | <a href='/reboot'>Reboot</a></p>"
+        "</body></html>",
+        SOFTAP_IP_STR, ip, note,
+        g_cfg.sta_ssid, g_cfg.sta_pass,
+        g_cfg.ap_ssid, g_cfg.ap_pass,
+        g_cfg.ups_name, g_cfg.nut_user, g_cfg.nut_pass
+    );
+}
+
+static void parse_form_kv(app_cfg_t *newcfg, const char *body, char *action_out, size_t action_sz) {
+    // Copy current config as base
+    *newcfg = g_cfg;
+    if (action_out && action_sz) action_out[0] = 0;
+
+    char tmp[HTTP_BODY_MAX + 1];
+    strlcpy0(tmp, body ? body : "", sizeof(tmp));
+
+    // tokenize key=value&...
+    char *saveptr = NULL;
+    for (char *tok = strtok_r(tmp, "&", &saveptr); tok; tok = strtok_r(NULL, "&", &saveptr)) {
+        char *eq = strchr(tok, '=');
+        if (!eq) continue;
+        *eq = 0;
+        char *k = tok;
+        char *v = eq + 1;
+        url_decode_inplace(k);
+        url_decode_inplace(v);
+        trim_ws(k);
+        // v can include spaces; keep them
+        if (strcmp(k, "sta_ssid") == 0) strlcpy0(newcfg->sta_ssid, v, sizeof(newcfg->sta_ssid));
+        else if (strcmp(k, "sta_pass") == 0) strlcpy0(newcfg->sta_pass, v, sizeof(newcfg->sta_pass));
+        else if (strcmp(k, "ap_ssid") == 0) strlcpy0(newcfg->ap_ssid, v, sizeof(newcfg->ap_ssid));
+        else if (strcmp(k, "ap_pass") == 0) strlcpy0(newcfg->ap_pass, v, sizeof(newcfg->ap_pass));
+        else if (strcmp(k, "ups_name") == 0) strlcpy0(newcfg->ups_name, v, sizeof(newcfg->ups_name));
+        else if (strcmp(k, "nut_user") == 0) strlcpy0(newcfg->nut_user, v, sizeof(newcfg->nut_user));
+        else if (strcmp(k, "nut_pass") == 0) strlcpy0(newcfg->nut_pass, v, sizeof(newcfg->nut_pass));
+        else if (strcmp(k, "action") == 0 && action_out && action_sz) strlcpy0(action_out, v, action_sz);
+    }
+}
+
+static void handle_http_client(int fd) {
+    char rx[HTTP_RX_MAX + 1];
+    int n = sock_read_until(fd, rx, sizeof(rx), "\r\n\r\n");
+    if (n <= 0) { close(fd); return; }
+
+    // Parse request line
+    char *line_end = strstr(rx, "\r\n");
+    if (!line_end) { http_send_400(fd, "Bad request"); close(fd); return; }
+    *line_end = 0;
+
+    char method[8] = {0}, path[128] = {0};
+    if (sscanf(rx, "%7s %127s", method, path) != 2) {
+        http_send_400(fd, "Bad request line"); close(fd); return;
+    }
+
+    // Headers start after request line
+    char *headers = line_end + 2;
+    char *hdr_end = strstr(headers, "\r\n\r\n");
+    if (!hdr_end) { http_send_400(fd, "Bad headers"); close(fd); return; }
+    char *body = hdr_end + 4;
+
+    int content_len = 0;
+    // We do minimal header scan: Content-Length if present
+    for (char *h = headers; h < hdr_end; ) {
+        char *eol = strstr(h, "\r\n");
+        if (!eol) break;
+        *eol = 0;
+        if (strncasecmp(h, "Content-Length:", 15) == 0) {
+            content_len = atoi(h + 15);
+        }
+        *eol = '\r';
+        h = eol + 2;
+    }
+
+    // If POST and body not fully read yet, read remaining bytes
+    int already = (int)strlen(body);
+    if (strcasecmp(method, "POST") == 0 && content_len > already) {
+        int remaining = content_len - already;
+        // Cap body to avoid overflow
+        if (content_len > HTTP_BODY_MAX) {
+            http_send_400(fd, "Body too large"); close(fd); return;
+        }
+        while (remaining > 0) {
+            int r = recv(fd, rx + n, (int)sizeof(rx) - 1 - n, 0);
+            if (r <= 0) break;
+            n += r;
+            rx[n] = 0;
+            remaining -= r;
+        }
+        // Recompute body pointer after buffer growth (still same base)
+        hdr_end = strstr(rx, "\r\n\r\n");
+        if (!hdr_end) { http_send_400(fd, "Bad request"); close(fd); return; }
+        body = hdr_end + 4;
+        // Ensure body is null-terminated
+        if ((int)strlen(body) > content_len) body[content_len] = 0;
+    }
+
+    // Routing
+    if (strcmp(path, "/") == 0) {
+        http_send_redirect(fd, "/config");
+    } else if (strcmp(path, "/config") == 0 && strcasecmp(method, "GET") == 0) {
+        char page[4096];
+        render_config_page(page, sizeof(page), "");
+        http_send_200_html(fd, page);
+    } else if (strcmp(path, "/status") == 0 && strcasecmp(method, "GET") == 0) {
+        char ip[16]; sta_ip_str(ip);
+        char json[512];
+        snprintf(json, sizeof(json),
+                 "{"
+                 "\"ap_ssid\":\"%s\","
+                 "\"sta_ssid\":\"%s\","
+                 "\"sta_ip\":\"%s\","
+                 "\"ups_name\":\"%s\","
+                 "\"nut_port\":%d"
+                 "}",
+                 g_cfg.ap_ssid, g_cfg.sta_ssid, ip, g_cfg.ups_name, NUT_TCP_PORT);
+        http_send_200_json(fd, json);
+    } else if (strcmp(path, "/save") == 0 && (strcasecmp(method, "POST") == 0 || strcasecmp(method, "GET") == 0)) {
+        // Support both:
+        //  - POST from HTML form (preferred)
+        //  - GET with query string (fallback if user tests manually)
+        const char *payload = "";
+        if (strcasecmp(method, "POST") == 0) {
+            payload = body;
+        } else {
+            // GET /save?key=val&...
+            char *q = strchr(path, '?');
+            payload = q ? (q + 1) : "";
+        }
+
+        app_cfg_t newcfg;
+        char action[32];
+        parse_form_kv(&newcfg, payload, action, sizeof(action));
+
+        // Basic validation (keep it simple, but avoid invalid WPA2 AP pass length)
+        if (!is_printable_ascii(newcfg.ap_ssid) || strlen(newcfg.ap_ssid) == 0) {
+            char page[4096];
+            render_config_page(page, sizeof(page), "Invalid AP SSID.");
+            http_send_200_html(fd, page);
+            close(fd);
+            return;
+        }
+
+        // Apply and save
+        g_cfg = newcfg;
+        esp_err_t err = cfg_save(&g_cfg);
+
+        char note[256] = {0};
+        if (err != ESP_OK) {
+            snprintf(note, sizeof(note), "Save failed: %s", esp_err_to_name(err));
+        } else {
+            snprintf(note, sizeof(note), "Saved OK.");
+        }
+
+        bool do_test = (strcmp(action, "save_test") == 0);
+        bool got_ip = false;
+        if (do_test && err == ESP_OK && g_cfg.sta_ssid[0]) {
+            ESP_LOGI(TAG, "Save+Test: attempting STA connect test...");
+            got_ip = sta_connect_test();
+            if (got_ip) {
+                char ip[16]; sta_ip_str(ip);
+                snprintf(note, sizeof(note), "Saved OK. STA connected: %s", ip);
+            } else {
+                snprintf(note, sizeof(note), "Saved OK, but STA connect test failed (will keep SoftAP available).");
+            }
+        }
+
+        char page[4096];
+        render_config_page(page, sizeof(page), note);
+        http_send_200_html(fd, page);
+    } else if (strcmp(path, "/reboot") == 0 && strcasecmp(method, "GET") == 0) {
+        http_send(fd, "200 OK", "text/plain", "Rebooting...\n");
+        shutdown(fd, SHUT_RDWR);
+        close(fd);
+        vTaskDelay(pdMS_TO_TICKS(200));
+        esp_restart();
+        return;
+    } else {
+        http_send_404(fd);
+    }
+
+    shutdown(fd, SHUT_RDWR);
+    close(fd);
+}
+
+static void http_server_task(void *arg) {
+    (void)arg;
+
+    int s = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+    if (s < 0) {
+        ESP_LOGE(TAG, "HTTP socket() failed");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    int yes = 1;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(HTTP_PORT);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+    if (bind(s, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        ESP_LOGE(TAG, "HTTP bind() failed");
+        close(s);
+        vTaskDelete(NULL);
+        return;
+    }
+    if (listen(s, 4) != 0) {
+        ESP_LOGE(TAG, "HTTP listen() failed");
+        close(s);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    ESP_LOGI(TAG, "HTTP server listening on http://%s/config (AP) and http://<STA-IP>/config (LAN)", SOFTAP_IP_STR);
+
+    while (1) {
+        struct sockaddr_in6 src;
+        socklen_t slen = sizeof(src);
+        int c = accept(s, (struct sockaddr *)&src, &slen);
+        if (c < 0) continue;
+        handle_http_client(c);
+    }
+}
+
+// ==========================
+// Minimal NUT/upsd server (plaintext)
+// ==========================
+typedef struct {
+    bool authed;
+} nut_session_t;
+
+static void nut_send(int fd, const char *s) {
+    if (!s) return;
+    send(fd, s, (int)strlen(s), 0);
+}
+
+static void nut_sendf(int fd, const char *fmt, ...) {
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    nut_send(fd, buf);
+}
+
+static void nut_handle_line(int fd, nut_session_t *sess, char *line) {
+    // Trim CRLF
+    for (int i = 0; line[i]; i++) {
+        if (line[i] == '\r' || line[i] == '\n') { line[i] = 0; break; }
+    }
+    trim_ws(line);
+    if (!line[0]) return;
+
+    // Tokenize (space-separated)
+    char *argv[5] = {0};
+    int argc = 0;
+    char *save = NULL;
+    for (char *t = strtok_r(line, " ", &save); t && argc < 5; t = strtok_r(NULL, " ", &save)) {
+        argv[argc++] = t;
+    }
+
+    // Common probes
+    if (strcasecmp(argv[0], "VER") == 0) {
+        nut_sendf(fd, "Network UPS Tools upsd-esp32 0.1\n");
+        return;
+    }
+    if (strcasecmp(argv[0], "NETVER") == 0) {
+        // Keep it simple; do NOT advertise STARTTLS capability.
+        nut_sendf(fd, "NETVER 1.0\n");
+        return;
+    }
+    if (strcasecmp(argv[0], "STARTTLS") == 0) {
+        // Explicitly refuse STARTTLS (plaintext-only server).
+        nut_sendf(fd, "ERR FEATURE-NOT-CONFIGURED\n");
+        return;
+    }
+
+    // Auth (optional): accept only if exact match; still allow read-only without auth.
+    if (strcasecmp(argv[0], "USERNAME") == 0 && argc >= 2) {
+        // we only mark authed after PASSWORD
+        nut_sendf(fd, "OK\n");
+        return;
+    }
+    if (strcasecmp(argv[0], "PASSWORD") == 0 && argc >= 2) {
+        // If user configured creds, consider session authed (for future protected commands).
+        // For now, we accept any password to keep read-only tooling happy.
+        // Tighten later when we add SET/INSTCMD support.
+        sess->authed = true;
+        nut_sendf(fd, "OK\n");
+        return;
+    }
+
+    // LIST UPS
+    if (strcasecmp(argv[0], "LIST") == 0 && argc >= 2 && strcasecmp(argv[1], "UPS") == 0) {
+        nut_sendf(fd, "BEGIN LIST UPS\n");
+        nut_sendf(fd, "UPS %s \"ESP32S3 USB UPS (HID)\"\n", g_cfg.ups_name);
+        nut_sendf(fd, "END LIST UPS\n");
+        return;
+    }
+
+    // LIST VAR <ups>
+    if (strcasecmp(argv[0], "LIST") == 0 && argc >= 3 && strcasecmp(argv[1], "VAR") == 0) {
+        const char *ups = argv[2];
+        if (strcmp(ups, g_cfg.ups_name) != 0) {
+            nut_sendf(fd, "ERR UNKNOWN-UPS\n");
+            return;
+        }
+        nut_sendf(fd, "BEGIN LIST VAR %s\n", ups);
+        nut_sendf(fd, "VAR %s battery.charge \"99\"\n", ups);
+        nut_sendf(fd, "VAR %s battery.runtime \"35640\"\n", ups);
+        nut_sendf(fd, "VAR %s input.utility.present \"1\"\n", ups);
+        nut_sendf(fd, "VAR %s ups.flags \"0x0000000D\"\n", ups);
+        nut_sendf(fd, "VAR %s ups.status \"OL\"\n", ups);
+        nut_sendf(fd, "END LIST VAR %s\n", ups);
+        return;
+    }
+
+    // GET VAR <ups> <var>
+    if (strcasecmp(argv[0], "GET") == 0 && argc >= 4 && strcasecmp(argv[1], "VAR") == 0) {
+        const char *ups = argv[2];
+        const char *var = argv[3];
+        if (strcmp(ups, g_cfg.ups_name) != 0) {
+            nut_sendf(fd, "ERR UNKNOWN-UPS\n");
+            return;
+        }
+        if (strcmp(var, "battery.charge") == 0)      nut_sendf(fd, "VAR %s %s \"99\"\n", ups, var);
+        else if (strcmp(var, "battery.runtime") == 0) nut_sendf(fd, "VAR %s %s \"35640\"\n", ups, var);
+        else if (strcmp(var, "input.utility.present") == 0) nut_sendf(fd, "VAR %s %s \"1\"\n", ups, var);
+        else if (strcmp(var, "ups.flags") == 0)      nut_sendf(fd, "VAR %s %s \"0x0000000D\"\n", ups, var);
+        else if (strcmp(var, "ups.status") == 0)     nut_sendf(fd, "VAR %s %s \"OL\"\n", ups, var);
+        else nut_sendf(fd, "ERR UNKNOWN-VAR\n");
+        return;
+    }
+
+    // HELP / unknown
+    nut_sendf(fd, "ERR INVALID-COMMAND\n");
+}
+
+static void nut_server_task(void *arg) {
+    (void)arg;
+
+    int s = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+    if (s < 0) {
+        ESP_LOGE(TAG, "NUT socket() failed");
+        vTaskDelete(NULL);
+        return;
+    }
+    int yes = 1;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(NUT_TCP_PORT);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+    if (bind(s, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        ESP_LOGE(TAG, "NUT bind() failed");
+        close(s);
+        vTaskDelete(NULL);
+        return;
+    }
+    if (listen(s, 4) != 0) {
+        ESP_LOGE(TAG, "NUT listen() failed");
+        close(s);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    ESP_LOGI(TAG, "NUT server listening on tcp/%d (plaintext)", NUT_TCP_PORT);
+
+    while (1) {
+        struct sockaddr_in6 src;
+        socklen_t slen = sizeof(src);
+        int c = accept(s, (struct sockaddr *)&src, &slen);
+        if (c < 0) continue;
+
+        nut_session_t sess = {0};
+        // line buffer
+        char buf[512];
+        int used = 0;
+
+        while (1) {
+            int r = recv(c, buf + used, (int)sizeof(buf) - 1 - used, 0);
+            if (r <= 0) break;
+            used += r;
+            buf[used] = 0;
+
+            // process complete lines
+            char *start = buf;
+            while (1) {
+                char *nl = strchr(start, '\n');
+                if (!nl) break;
+                *nl = 0;
+                char line[256];
+                strlcpy0(line, start, sizeof(line));
+                nut_handle_line(c, &sess, line);
+                start = nl + 1;
+            }
+
+            // move remaining partial line to beginning
+            int rem = (int)strlen(start);
+            if (rem > 0 && start != buf) memmove(buf, start, rem + 1);
+            used = rem;
+            if (used >= (int)sizeof(buf) - 1) used = 0; // safety reset
+        }
+
+        shutdown(c, SHUT_RDWR);
+        close(c);
+    }
+}
+
+// ==========================
+// app_main
+// ==========================
+void app_main(void) {
+    ESP_LOGI(TAG, "=======================================");
+    ESP_LOGI(TAG, "Milestone v14: Rebuild from v13.6 baseline (raw HTTP server to avoid 431 header limits)");
+    ESP_LOGI(TAG, "=======================================");
+
+    ESP_ERROR_CHECK(nvs_flash_init());
+    esp_err_t err = cfg_load(&g_cfg);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "NVS cfg not found yet (first boot). Using defaults.");
+    }
+
+    // Ensure AP SSID exists (first boot / erased flash)
+    if (!g_cfg.ap_ssid[0]) {
+        make_default_ap_ssid(g_cfg.ap_ssid);
+        g_cfg.ap_pass[0] = 0; // start open; user can set in portal (8+ chars)
+        cfg_save(&g_cfg);
+    }
+
+    wifi_init_apsta();
+
+    // Start servers
+    xTaskCreate(http_server_task, "http_srv", 8192, NULL, 5, NULL);
+    xTaskCreate(nut_server_task,  "nut_srv",  8192, NULL, 5, NULL);
+
+    ESP_LOGI(TAG, "Ready. Configure via SoftAP portal: http://%s/config", SOFTAP_IP_STR);
+}

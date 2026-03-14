@@ -1,0 +1,78 @@
+
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>ESP Status</title>
+</head>
+
+<body style="color: #d6d0d0; background-color: #82817d;"><br>
+<blockquote>
+<h1 class="Status"; style="color: #000000;">&nbsp; &nbsp;ESP32-S3 Network UPS Tool - Config</h1>
+</blockquote>
+<p>&nbsp;</p>
+<table style="width: fit-content;">
+<tbody>
+<tr style="height: 19px;">
+  <td colspan="2" style="width: fit-content; height: 19px; text-align: left;"><h3><strong><font color="#000000">JOIN Local WiFi (Sta)</font></strong></h3></td>
+  </tr>
+<tr style="height: 19px;">
+  <td style="width: fit-content; height: 19px; text-align: left;">SSID:</td>
+  <td style="height: 19px;">
+    <input name='sta_ssid' maxlength='32' value='Local Wifi SSID'></td>
+</tr>
+<tr style="height: 19px;">
+  <td style="width: fit-content; height: 19px; text-align: left;">Password:</td>
+  <td style="height: 19px;"><input name='sta_pass' maxlength='64' value='password' type='password'></td>
+</tr>
+<tr>
+  <td colspan="2" style="width: fit-content; height: 19px; text-align: left;"><h3><strong><font color="#000000">Soft AP (Setup Portal)</font></strong></h3></td>
+  </tr>
+<tr style="height: 19px;">
+<td style="width: fit-content; height: 19px; text-align: left;">AP SSID: </td>
+<td style="height: 19px;"><input name='ap_ssid' maxlength='32' value='ESP32-UPS-SETUP-4AE49D'></td>
+</tr>
+<tr style="height: 19.5px;">
+<td style="width: fit-content; height: 19.5px; text-align: left;">AP Password<br>
+	<em> <font size=2>(8+ chars, blank=open)</font>:</em></td>
+<td style="height: 19.5px;"><span style="height: 19px;">
+  <input name='ap_pass' maxlength='64' value='admin' type='password'>
+</span></td>
+</tr>
+<tr style="height: 19px;">
+<td colspan="2" style="width: fit-content; height: 19px; text-align: left;"><h3><strong><font color="#000000">NUT Identity</font></strong></h3></td>
+</tr>
+<tr style="height: 16px;">
+<td style="width: fit-content; height: 16px; text-align: left;">UPS Name:</td>
+<td style="height: 16px;"><span style="height: 19px;">
+  <input name='ups_name' maxlength='32' value='ups'>
+</span></td>
+</tr>
+<tr style="height: 16px;">
+<td style="width: fit-content; height: 16px; text-align: left;">NUT Username:</td>
+<td style="height: 16px;"><span style="height: 19px;">
+  <input name='nut_user' maxlength='32' value='admin'>
+</span></td>
+</tr>
+<tr style="height: 16px;">
+<td style="width: fit-content; height: 16px; text-align: left;">NUT Password:</td>
+<td style="height: 16px;"><span style="height: 19px;">
+  <input name='nut_pass' maxlength='32' value='admin' type='password'>
+</span></td>
+</tr>
+<tr style="height: 16px;">
+<td colspan="2" style="width: fit-content; height: 16px; text-align: left;"><h3><strong><font color="#000000">CONFIG Setting</font></strong></h3></td>
+</tr>
+<tr style="height: 16px;">
+  <td style="width: fit-content; height: 16px; text-align: left;">Config login PW:</td>
+  <td style="height: 16px;"><span style="height: 19px;">
+    <input name='Configpw' maxlength='32' value='password' type='password'>
+  </span></td>
+</tr>
+</tbody>
+</table>
+<br>
+<a href="/config/">CONFIGURE</a>
+<p><br /><br /></p>
+</body>
+</html>

@@ -1,0 +1,194 @@
+ESP32-S3 + APC UPS (USB HID) + NUT Distributed Monitoring Architecture
+UPDATED CONTEXT & STATUS (as of 2026-03-04)
+
+1) Project Goal
+Build ESP32-S3 “UPS nodes” that:
+- Plug into APC Back-UPS/Smart-UPS units that expose USB HID over the UPS RJ50 port (via RJ50→USB cable).
+- Read telemetry over USB HID on the ESP32-S3 OTG port.
+- Expose a NUT-compatible network interface (upsd-like) on LAN so NUT clients can query it as:
+  upsmon@10.0.0.x  (conceptually: NUT client connects to TCP 3493 on the ESP32 node).
+- Provide a built-in web UI for configuration (UPS name, Wi‑Fi, NUT username/password) + a “save & reboot” option.
+
+2) Network / Roles
+LAN: 10.0.0.0/16
+
+Central aggregator:
+- Orange Pi Zero 2W (Allwinner H618, 4GB RAM)
+- Static IP: 10.0.0.6
+- Runs “real” NUT server/monitoring and aggregates ESP32 nodes (netclient driver).
+- Home Assistant reads ONLY the Orange Pi NUT server (single integration point).
+- Future phase: Orange Pi orchestrates staged shutdowns (VMs over SSH/CLI, then Proxmox host).
+
+ESP32 UPS nodes:
+- One ESP32-S3 per UPS.
+- Each node hosts:
+  - USB HID reader (OTG)
+  - NUT-compatible TCP service (port 3493)
+  - HTTP configuration/status page
+- Power:
+  - OTG VBUS powered via the board’s solder bridge that routes power from the “regular” USB-C/power path to the OTG port.
+  - No extra support boards desired.
+
+3) Hardware Notes (ESP32-S3 Board)
+- ESP32-S3 dual-core LX7 up to 240MHz
+- 16MB Flash, 8MB PSRAM
+- Two USB-C ports:
+  - One for UART/programming
+  - One for native USB OTG
+
+4) Cable / Physical Interface
+- UPS side: RJ50 communication port (APC proprietary physical, USB HID logical for BR1500MS-class devices).
+- Cable approach:
+  - Use genuine RJ50→USB-A cable (confirmed working on Orange Pi).
+  - Use USB-A→USB-C adapter into ESP32-S3 OTG port.
+  - (Alternate plan: custom 6-core RJ50→USB-C pigtail, with D+/D- and CC1/CC2 wiring per USB-C requirements.)
+- Key requirement: OTG VBUS must be present (solder bridge completed on the board).
+
+5) Software Stack Targets
+ESP32-S3 (ESP-IDF / ESP-IDF 5.3.1):
+- USB host stack: enumerate device, identify HID interface, open interrupt IN endpoint, read HID reports.
+- HID parsing:
+  - Start with “raw report logging” to confirm data flow.
+  - Then decode key fields needed by NUT variables.
+- NVS persistence:
+  - Store Wi‑Fi credentials
+  - Store UPS “name” (NUT upsname)
+  - Store NUT username + password hash (do not store plain text)
+- Networking:
+  - STA Wi‑Fi connect (static IP optional; otherwise DHCP)
+  - Provide:
+    - TCP 3493 service (NUT subset)
+    - HTTP config/status service
+
+Orange Pi:
+- NUT server (upsd) + monitoring (upsmon).
+- Connects to ESP32 nodes using netclient driver.
+
+6) Milestones & Progress
+
+Milestone 0 (Environment + flashing)
+- ESP-IDF + ESP-IDF IDE installed.
+- Project created from template, target set to esp32s3.
+- idf.py flash/monitor works from CLI.
+- Noted warning on boot:
+  “Detected size(16384k) larger than the size in the binary image header(2048k).”
+  (This indicates sdkconfig/build flash size setting mismatch vs actual 16MB flash; needs config fix later.)
+
+Milestone 1 (USB enumeration on ESP32-S3 OTG) ✅ COMPLETE
+- USB host installed and client registered successfully.
+- When UPS is plugged into OTG:
+  - “USB device connected, address=1”
+  - Detected VID:PID = 051d:0002 (APC UPS)
+  - Interface 0 class=0x03 (HID) detected
+- This confirms: OTG power + USB signaling are working with the genuine RJ50→USB-A cable + adapter.
+
+Milestone 1B (Linux reference data)
+- Orange Pi ‘lsusb -v -d 051d:0002’ shows:
+  - One HID interface
+  - Interrupt IN endpoint 0x81, max packet 8 bytes, interval 100ms
+  - Report descriptor length 1049 bytes (unavailable due to permissions/busy)
+
+
+Milestone 2 (Read & print HID data) ✅ COMPLETE
+- ESP32-S3 successfully reads raw HID interrupt reports from the APC UPS.
+- ESP-IDF version: v5.3.1-dirty
+- Device detected: VID:PID = 051d:0002
+- USB speed: FULL
+- HID interface: 0
+- Interrupt endpoint: 0x81
+- Max packet size: 8 bytes
+
+Behavior:
+- ESP32 enumerates the UPS and claims the HID interface.
+- Interrupt IN transfers stream continuously.
+- Raw HID reports are printed to the serial console.
+
+Example interrupt reports observed:
+
+06 00 00 08
+0C 64 A0 8C
+13 01
+14 00 00
+16 0C 00 00 00
+21 06
+
+
+Milestone 2A.1 (Dump HID Report Descriptor) ✅ COMPLETE
+
+Working reference firmware tag: UPS_USB_M2A1
+
+The ESP32-S3 successfully retrieves and dumps the full HID Report Descriptor
+from the APC UPS using a control transfer.
+
+Key behaviors:
+- Descriptor length reported by device: 1049 bytes
+- Control transfer padded to 1088 bytes (EP0 max packet size 64)
+- Descriptor fully dumped to serial log
+- HID interrupt reader started after descriptor fetch
+
+This milestone confirms the ESP32-S3 can fully communicate with the UPS HID
+device and receive telemetry data over the interrupt endpoint.
+
+Important improvements implemented in this revision:
+
+- USB operations moved out of the client event callback into the USB client task
+- Eliminated misleading "Waiting for UPS attach" polling spam
+- Logging now occurs only on USB events or incoming HID data
+
+Current State:
+- Working enumeration & HID interface detection.
+- Need to rework Milestone 2 implementation to match ESP-IDF 5.3.1 USB host transfer API
+  (allocate transfer via usb_host_transfer_alloc, fill transfer->data_buffer (as provided by alloc),
+   submit interrupt IN transfers correctly, and handle completion via callbacks or event loop).
+
+7) NUT Compatibility Plan (ESP32)
+ESP32 will implement a minimal, real NUT “upsd-like” server on TCP 3493:
+- Commands (initial subset):
+  - VER
+  - LIST UPS
+  - LIST VAR <upsname>
+  - GET VAR <upsname> <var>
+  - USERNAME / PASSWORD (auth)
+  - QUIT
+- Variables (initial):
+  - device.mfr, device.model, device.serial
+  - ups.status
+  - ups.load
+  - battery.charge
+  - battery.runtime
+  - input.voltage
+- Authentication:
+  - Require auth for variable access.
+  - Store password hashed in NVS (salted), not plaintext.
+
+8) Web UI (ESP32)
+Endpoints:
+- /          Status dashboard:
+  - UPS connected/disconnected
+  - Latest battery charge/runtime/load/input voltage (when available)
+  - Last update timestamp
+- /config    Configuration form:
+  - UPS name (NUT identifier)
+  - Wi‑Fi SSID / password
+  - NUT username
+  - NUT password (set/replace)
+  - Save
+  - Save + Reboot
+
+9) Next Actions (Milestone 2A)
+- Fix “flash size” configuration (set 16MB in menuconfig) to remove the warning.
+- Parse HID interrupt reports into structured UPS telemetry fields using ESP-IDF 5.3.1 supported APIs:
+  - Find the HID interrupt IN endpoint (0x81) and max packet size (8).
+  - Allocate a usb_transfer_t with correct size.
+  - Submit transfer; on completion, print the 8 bytes (hex) to serial log continuously.
+- After raw reports confirmed:
+  - Add basic decoding into named fields.
+  - Map fields into NUT variables.
+
+10) Notes / Requirements Re-stated
+- Must auto-detect UPS models that use USB HID via RJ50 (not hardcode to only one model).
+- ESP32 must handle identification and expose consistent NUT variable set.
+- Central Orange Pi at 10.0.0.6 aggregates and is the only device Home Assistant talks to.
+- No need to install NUT clients on every system/VM; central server handles orchestration.
+
+End of Updated Summary

@@ -1,0 +1,459 @@
+
+Last updated: 2026-03-05
+ESP32-S3 + APC UPS (USB HID) + NUT Distributed Monitoring Architecture
+UPDATED CONTEXT & STATUS (v8 – note Option A flash failure / Option B success, updated 2026-03-05)
+
+---------------------------------------------------------------------
+1) Project Goal
+---------------------------------------------------------------------
+Build ESP32-S3 “UPS nodes” that:
+
+• Connect to APC UPS units that expose USB HID via the RJ50 communication port
+• Read UPS telemetry using the ESP32-S3 USB OTG host interface
+• Expose a NUT-compatible TCP service so standard NUT clients can query the node
+• Provide a web UI for configuration and monitoring
+• Operate as distributed UPS monitoring nodes across a LAN
+
+Primary use case:
+Centralize monitoring of multiple UPS units without needing a full computer
+attached to each UPS.
+
+---------------------------------------------------------------------
+2) Network Architecture
+---------------------------------------------------------------------
+
+LAN Range:
+10.0.0.0 / 16
+
+Central Aggregator Node
+-----------------------
+Device:
+Orange Pi Zero 2W (Allwinner H618)
+
+IP:
+10.0.0.6
+
+Responsibilities:
+• Runs full NUT server (upsd)
+• Aggregates ESP32 UPS nodes using the NUT netclient driver
+• Serves as the single integration point for Home Assistant
+• Coordinates staged shutdowns of infrastructure
+
+Future shutdown order:
+VMs → Hypervisor → Infrastructure
+
+Home Assistant interacts ONLY with the Orange Pi NUT server.
+
+---------------------------------------------------------------------
+3) ESP32 UPS Node Responsibilities
+---------------------------------------------------------------------
+
+Each ESP32 node hosts:
+
+• USB HID UPS reader
+• NUT-compatible TCP service (port 3493)
+• HTTP configuration UI
+• Local telemetry processing
+• Persistent configuration storage (NVS)
+
+Expected configuration options:
+
+• UPS name
+• WiFi credentials
+• NUT username
+• NUT password
+• optional static IP
+
+---------------------------------------------------------------------
+4) Hardware Platform
+---------------------------------------------------------------------
+
+Board:
+ESP32-S3 development board
+
+Capabilities:
+• Dual‑core Xtensa LX7 CPU
+• Up to 240MHz
+• 16MB Flash
+• 8MB PSRAM
+• Native USB OTG controller
+
+USB Ports:
+1) UART/programming USB‑C
+2) Native OTG USB‑C
+
+Power configuration:
+OTG VBUS supplied through onboard solder bridge so the ESP32 can power
+attached USB devices (UPS interface).
+
+---------------------------------------------------------------------
+5) UPS Interface
+---------------------------------------------------------------------
+
+APC UPS models expose a USB HID interface through the RJ50 port.
+
+Connection chain used:
+
+UPS RJ50 port
+→ APC RJ50‑to‑USB cable
+→ USB‑A to USB‑C adapter
+→ ESP32 OTG port
+
+Confirmed working with APC VID:PID
+
+051D:0002
+
+---------------------------------------------------------------------
+6) Software Stack
+---------------------------------------------------------------------
+
+ESP32 firmware:
+ESP‑IDF 5.3.1
+
+Major components:
+
+• USB Host stack
+• HID descriptor parser
+• HID interrupt report reader
+• Telemetry decoder
+• NUT TCP service
+• HTTP configuration UI
+• NVS configuration storage
+
+Central aggregator:
+
+Orange Pi Zero 2W
+Linux NUT server
+
+---------------------------------------------------------------------
+7) Milestones and Current Status
+---------------------------------------------------------------------
+
+Milestone 0 – Development Environment
+-------------------------------------
+COMPLETE
+
+• ESP‑IDF installed
+• Project template created
+• ESP32‑S3 target configured
+• Flash / monitor workflow verified
+
+
+Milestone 1 – USB Enumeration
+-----------------------------
+COMPLETE
+
+ESP32 successfully detects UPS device.
+
+Detected device:
+
+VID:PID = 051d:0002
+
+USB interface:
+
+Class = HID
+Interface = 0
+
+
+Milestone 2 – HID Interrupt Reading
+-----------------------------------
+COMPLETE
+
+ESP32 successfully reads interrupt reports from UPS.
+
+USB parameters:
+
+Speed:
+FULL
+
+Interrupt endpoint:
+0x81
+
+Max packet size:
+8 bytes
+
+Example reports:
+
+06 00 00 08
+0C 64 A0 8C
+13 01
+14 00 00
+16 0C 00 00 00
+21 06
+
+
+Milestone 2A.1 – HID Descriptor Dump
+------------------------------------
+COMPLETE
+
+Reference firmware tag:
+UPS_USB_M2A1
+
+ESP32 successfully retrieves the full HID Report Descriptor.
+
+Descriptor length:
+1049 bytes
+
+Control transfer padded to:
+1088 bytes (EP0 max packet 64)
+
+Descriptor fully dumped to serial log.
+
+Firmware improvements implemented:
+
+• USB operations moved outside client event callback
+• Event driven USB handling
+• Removal of “waiting for UPS attach” polling spam
+
+
+Milestone 3 – HID report monitor (change-only) + capture raw frames
+---------------------------------------------------------------
+COMPLETE (validated 2026-03-04)
+
+What we achieved:
+
+- Claimed HID interface 0, alt 0 on APC UPS VID:PID 051d:0002
+- Found interrupt IN endpoint EP=0x81, MPS=8
+- Started a continuous interrupt-IN reader that prints reports **only when the payload changes**
+  (keeps logs readable and avoids “polling spam”)
+
+Observed raw report IDs / frames (examples):
+
+- 06 00 00 08
+- 0C 64 A0 8C
+- 13 01
+- 14 00 00
+- 16 0C 00 00 00
+- 21 06
+
+Device detach / reattach behavior (validated 2026-03-05):
+
+- On unplug, USB host reports “Device gone”, the in-flight INT-IN transfer completes with status=7,
+  and resubmitting returns ESP_ERR_INVALID_STATE.
+- Our logic then receives DEV_GONE and stops the session cleanly.
+- On re-plug, NEW_DEV arrives and the session re-opens/claims again successfully.
+
+Key log lines from the validated run:
+
+- “HID Report Descriptor length = 1049 bytes (from HID descriptor 0x21)”
+- “Starting interrupt IN reader: EP=0x81 MPS=8 (change-only)”
+- “HID IN changed (...) ...” (repeats only when frames differ)
+
+Notes / gotchas:
+
+- A prior Milestone 3 attempt that *waited synchronously* for the HID Report Descriptor could time out and then crash.
+  For Milestone 3 we do not block the USB client task; we move forward with streaming interrupt-IN reports.
+
+Next (Milestone 3.1):
+
+- Build a parser that maps these raw HID report IDs/fields into NUT-style values
+  (battery.charge, battery.runtime, input.voltage, ups.status, etc.), and expose them internally as a struct.
+
+Milestone 4: Start decoding key UPS reports (basic)
+----------------------------------------------
+STATUS: COMPLETE (basic decode proven on APC 051d:0002)
+
+What we decode now (based on observed report IDs in interrupt-IN stream):
+- Report ID 0x0C (4 bytes payload observed): battery percent + runtime seconds
+  - Example: 0C 64 A0 8C  -> batt=100% runtime=36000 s
+  - Example: 0C 63 A0 8C  -> batt= 99% runtime=36000 s
+  - Example: 0C 63 38 8B  -> batt= 99% runtime=35640 s
+  - Example: 0C 62 D0 89  -> batt= 98% runtime=35280 s
+
+- Report ID 0x13 (2 bytes payload observed): AC present boolean
+  - Example: 13 01 -> AC_present=1
+  - Example: 13 00 -> AC_present=0
+
+- Report ID 0x16 (5 bytes payload observed): status/flags bitfield (little-endian, 32-bit)
+  - Example: 16 0C 00 00 00 -> flags=0x0000000C
+  - Example: 16 0A 00 00 00 -> flags=0x0000000A
+  - Example: 16 0D 00 00 00 -> flags=0x0000000D
+  - Current code logs a bit-diff view on change (which bits flipped). Meanings are still TBD.
+
+Power-fail / restore test results (APC load very light, so small changes expected):
+- AC pulled ~20 seconds:
+  - 0x13 changed 1 -> 0
+  - 0x16 changed 0x0000000C -> 0x0000000A (diff 0x00000006)
+  - 0x0C battery dropped 100% -> 99% shortly after
+
+- AC restored:
+  - 0x13 changed 0 -> 1
+  - 0x0C runtime and battery updated (99%->98% seen during recovery)
+  - 0x16 changed 0x0000000A -> 0x0000000D (diff 0x00000007)
+
+Notes / gotchas:
+- One attempted build failed with: usb_transfer_t has no member named 'setup'
+  - Keep using the known-good control-transfer pattern for report-descriptor fetch on ESP-IDF v5.3.1.
+- On one attach, log showed “HID Report Descriptor received: 1057 bytes” and extra trailing bytes printed after the expected descriptor.
+  - Treat this as a bug/edge case in our dump path (length mismatch / buffer overrun risk) to fix next.
+
+
+Milestone 5 – NUT TCP Service
+-----------------------------
+PLANNED
+
+ESP32 will implement minimal NUT server protocol on TCP port 3493.
+
+
+Milestone 6 – Web Configuration Interface
+-----------------------------------------
+PLANNED
+
+
+---------------------------------------------------------------------
+8) HID Descriptor Reverse Engineering Notes
+---------------------------------------------------------------------
+
+The HID report descriptor length captured from the UPS is:
+
+1049 bytes
+
+The descriptor contains multiple report IDs.
+
+Observed report IDs include:
+
+06
+0C
+13
+14
+16
+21
+
+These IDs correspond to different telemetry groups inside the UPS.
+
+Typical fields expected from APC HID UPS devices:
+
+• battery charge percentage
+• battery runtime remaining
+• input voltage
+• output voltage
+• load percentage
+• UPS status flags
+• alarm states
+
+The descriptor will be parsed to determine:
+
+• Report ID structure
+• Field bit lengths
+• Scaling factors
+• Unit conversions
+
+Once decoded, these will be mapped to NUT variables.
+
+
+---------------------------------------------------------------------
+9) Planned NUT Variable Mapping
+---------------------------------------------------------------------
+
+Initial NUT variables to support:
+
+device.mfr
+device.model
+device.serial
+
+ups.status
+ups.load
+
+battery.charge
+battery.runtime
+
+input.voltage
+
+Additional variables may include:
+
+battery.voltage
+output.voltage
+battery.temperature
+
+
+---------------------------------------------------------------------
+10) Configuration Storage
+---------------------------------------------------------------------
+
+ESP32 will store configuration in NVS.
+
+Persistent values:
+
+• WiFi SSID
+• WiFi password
+• UPS name
+• NUT username
+• NUT password hash
+
+
+---------------------------------------------------------------------
+11) Web Interface
+---------------------------------------------------------------------
+
+Endpoints planned:
+
+/
+
+Status dashboard
+
+Shows:
+
+UPS connection status
+Battery charge
+Runtime remaining
+Input voltage
+Last update timestamp
+
+
+/config
+
+Configuration page
+
+Allows setting:
+
+UPS name
+WiFi credentials
+NUT username
+NUT password
+
+Buttons:
+
+Save
+Save + Reboot
+
+
+---------------------------------------------------------------------
+12) Future Enhancements
+---------------------------------------------------------------------
+
+• Support multiple UPS models automatically
+• Expand NUT variable coverage
+• Add firmware OTA update support
+• Add UPS event notifications
+• Implement power‑loss orchestration logic
+
+---------------------------------------------------------------------
+END OF DOCUMENT
+---------------------------------------------------------------------
+
+---------------------------------------------------------------------
+9) Latest test notes (Mar 5, 2026)
+---------------------------------------------------------------------
+• Working reference main.c (Milestone 3 + descriptor dump + initial decode):
+  - Successfully enumerates APC UPS VID:PID 051d:0002
+  - Claims HID interface 0 / alt 0
+  - Interrupt IN EP 0x81 MPS 8
+  - HID Report Descriptor length observed as 1049 bytes (and dumped)
+  - Change-only interrupt report logging confirmed
+  - Initial decode confirmed:
+    - Report ID 0x0C: battery % and runtime seconds
+    - Report ID 0x13: AC present (mains)
+    - Report ID 0x16: flags (bit-diff logging around AC transitions)
+
+• Battery test:
+  - UPS unplugged from AC for ~20 seconds, then restored.
+  - Observed transitions:
+    - AC_present 1 -> 0, flags 0x0000000C -> 0x0000000A, batt 100% -> 99%
+    - AC_present 0 -> 1, flags 0x0000000A -> 0x0000000D, batt 99% -> 98%, runtime dropped.
+
+• Build/flash regression note:
+  - “Option A” (new main.c variant) failed during the flash step in user testing.
+  - “Option B” flashed successfully and is the current known-good baseline.
+  - Next action when time permits: capture the exact idf.py flash/esptool error text for Option A to determine
+    whether the failure is (a) app image too large for the 1MB factory partition, (b) serial/bootloader
+    handshake issue, or (c) other tooling issue.
