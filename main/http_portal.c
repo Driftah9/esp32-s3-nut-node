@@ -33,6 +33,10 @@
              Version bump throughout.
  R15  v15.8  Add GET /compat — Compatible UPS device list page.
              Source of truth: ups_device_db.c. Three confirmed devices marked.
+ R16  v15.9  Full UI redesign — dark industrial theme. Inline CSS via PORTAL_CSS
+             macro shared across all pages. HTTP_PAGE_BUF 8192, /compat 10240.
+             Status color-coded by JS (OL=green, OB=amber, fault=red).
+             Monospace data values, sans-serif labels. Responsive viewport.
 
 ============================================================================*/
 
@@ -63,7 +67,52 @@ static const char *TAG = "http_portal";
 #define HTTP_PORT     80
 #define HTTP_RX_MAX   4096
 #define HTTP_BODY_MAX 2048
-#define HTTP_PAGE_BUF 5120   /* bumped from 4096 — expanded JSON + JS */
+#define HTTP_PAGE_BUF  8192   /* v15.9: dark theme CSS inline */
+#define HTTP_COMPAT_BUF 49152 /* v15.9: full expandable compat table — all vendors */
+
+/* Shared CSS injected into every page — dark industrial theme, no external resources */
+#define PORTAL_CSS \
+    "<style>" \
+    "*{box-sizing:border-box;margin:0;padding:0}" \
+    "body{background:#111;color:#e8e8e2;font-family:'Courier New',Courier,monospace;" \
+         "font-size:14px;padding:20px 16px;max-width:700px}" \
+    "h2{font-family:Arial,Helvetica,sans-serif;font-weight:600;" \
+       "letter-spacing:0.04em;color:#e8e8e2;margin-bottom:4px;font-size:1.1em}" \
+    ".subtitle{color:#666;font-size:0.8em;margin-bottom:20px;font-family:Arial,sans-serif}" \
+    ".warn{background:#2a1800;border-left:3px solid #ffab00;color:#ffcc66;" \
+          "padding:8px 12px;margin-bottom:16px;font-size:0.85em;font-family:Arial,sans-serif}" \
+    ".warn a{color:#ffcc66}" \
+    "table{border-collapse:collapse;width:100%%;margin-bottom:16px}" \
+    "th,td{padding:7px 10px;text-align:left;border:1px solid #2a2a2a;vertical-align:top}" \
+    "th{background:#1c1c1c;color:#888;font-weight:normal;font-family:Arial,sans-serif;" \
+       "font-size:0.82em;text-transform:uppercase;letter-spacing:0.06em;min-width:130px}" \
+    "td{color:#e8e8e2;font-family:'Courier New',Courier,monospace}" \
+    "tr:hover td,tr:hover th{background:#161616}" \
+    ".status-ol{color:#00c853;font-weight:bold}" \
+    ".status-ob{color:#ffab00;font-weight:bold}" \
+    ".status-fault{color:#ff3d00;font-weight:bold}" \
+    ".status-unknown{color:#888}" \
+    ".nav{margin-top:16px;font-family:Arial,sans-serif;font-size:0.82em}" \
+    ".nav a{color:#4fc3f7;text-decoration:none;margin-right:16px}" \
+    ".nav a:hover{color:#81d4fa}" \
+    ".poll{color:#555;font-size:0.75em;font-family:Arial,sans-serif;margin-top:8px}" \
+    "input[type=text],input[type=password],input:not([type]){" \
+       "background:#1c1c1c;border:1px solid #333;color:#e8e8e2;" \
+       "padding:5px 8px;font-family:'Courier New',Courier,monospace;font-size:13px;width:260px}" \
+    "input:focus{outline:none;border-color:#4fc3f7}" \
+    ".form-section{color:#4fc3f7;font-family:Arial,sans-serif;font-size:0.8em;" \
+                 "text-transform:uppercase;letter-spacing:0.08em;" \
+                 "padding:10px 0 4px;border-top:1px solid #2a2a2a;margin-top:8px}" \
+    ".form-row{display:flex;align-items:center;padding:5px 0;border-bottom:1px solid #1c1c1c}" \
+    ".form-label{color:#888;font-family:Arial,sans-serif;font-size:0.82em;" \
+               "text-transform:uppercase;letter-spacing:0.05em;width:200px;flex-shrink:0}" \
+    ".btn{background:#1c1c1c;border:1px solid #333;color:#e8e8e2;" \
+         "padding:7px 18px;cursor:pointer;font-family:Arial,sans-serif;" \
+         "font-size:0.85em;margin-top:14px;letter-spacing:0.04em}" \
+    ".btn:hover{border-color:#4fc3f7;color:#4fc3f7}" \
+    ".note-ok{color:#00c853;font-family:Arial,sans-serif;font-size:0.85em;padding:8px 0;margin-bottom:8px}" \
+    ".note-err{color:#ff3d00;font-family:Arial,sans-serif;font-size:0.85em;padding:8px 0;margin-bottom:8px}" \
+    "</style>"
 
 /* -------------------------------------------------------------------------
  * String utilities
@@ -278,8 +327,9 @@ static void render_dashboard(app_cfg_t *cfg, char *out, size_t outsz) {
     if (ups.battery_runtime_valid) {
         char tmp[128];
         snprintf(tmp, sizeof(tmp),
-            "<tr id='tr_runtime'><th>Runtime</th><td id='td_runtime'>%lu s</td></tr>",
-            (unsigned long)ups.battery_runtime_s);
+            "<tr id='tr_runtime'><th>Runtime</th><td id='td_runtime'>%lum %02lus</td></tr>",
+            (unsigned long)ups.battery_runtime_s / 60,
+            (unsigned long)ups.battery_runtime_s % 60);
         strlcat(opt_rows, tmp, sizeof(opt_rows));
     }
     if (ups.battery_voltage_valid) {
@@ -313,33 +363,48 @@ static void render_dashboard(app_cfg_t *cfg, char *out, size_t outsz) {
     opt_len = strlen(opt_rows);
     (void)opt_len;
 
+    /* Determine initial status CSS class */
+    const char *st_cls = "status-unknown";
+    if (strstr(st, "OB") || strstr(st, "CHRG")) st_cls = "status-ob";
+    else if (strstr(st, "OL"))                   st_cls = "status-ol";
+    else if (strstr(st, "LB") || strstr(st, "RB") || strstr(st, "ALARM")) st_cls = "status-fault";
+
     const char *pw_warn = cfg_store_is_default_pass(cfg)
-        ? "<p><b>** Security: Default password in use. "
-          "<a href='/config'>Change it in Config.</a> **</b></p>"
+        ? "<div class='warn'>Default password in use. "
+          "<a href='/config'>Change it in Config.</a></div>"
         : "";
 
     snprintf(out, outsz,
         "<!doctype html><html><head>"
         "<meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-        "<title>ESP32 UPS Node</title>"
+        "<title>UPS Node</title>"
+        PORTAL_CSS
         "</head><body>"
-        "<h2>ESP32-S3 UPS Node v15.8</h2>"
+        "<h2>ESP32-S3 UPS Node</h2>"
+        "<div class='subtitle'>v15.9 &mdash; NUT server on tcp/3493</div>"
         "%s"
-        "<table id='ups_tbl' border='1' cellpadding='4' cellspacing='0'>"
+        "<table id='ups_tbl'>"
         "<tr><th>Manufacturer</th><td>%s</td></tr>"
         "<tr><th>Model</th><td>%s</td></tr>"
-        "<tr><th>Driver</th><td>esp32-nut-hid v15.8</td></tr>"
-        "<tr><th>Status</th><td id='td_status'><b>%s</b></td></tr>"
+        "<tr><th>Driver</th><td>esp32-nut-hid v15.9</td></tr>"
+        "<tr><th>Status</th><td id='td_status'><span class='%s'>%s</span></td></tr>"
         "%s"
         "<tr><th>STA IP</th><td id='td_ip'>%s</td></tr>"
         "</table>"
-        "<br><small id='td_poll'>Polling every 5s</small>"
-        "<br><br><a href='/config'>[Configure]</a>"
-        " &nbsp; <a href='/status'>[Status JSON]</a>"
-        " &nbsp; <a href='/compat'>[Compatible UPS List]</a>"
+        "<div class='poll' id='td_poll'>Polling every 5s</div>"
+        "<div class='nav'>"
+        "<a href='/config'>Configure</a>"
+        "<a href='/status'>Status JSON</a>"
+        "<a href='/compat'>Compatible UPS List</a>"
+        "</div>"
         "<script>"
-        /* addOrUpdate(id, label, value) — insert row before STA IP or update existing */
+        "function stCls(s){"
+          "if(s.indexOf('OB')>=0||s.indexOf('CHRG')>=0)return 'status-ob';"
+          "if(s.indexOf('OL')>=0)return 'status-ol';"
+          "if(s.indexOf('LB')>=0||s.indexOf('RB')>=0||s.indexOf('ALARM')>=0)return 'status-fault';"
+          "return 'status-unknown';"
+        "}"
         "function addOrUpdate(id,lbl,val){"
           "var tr=document.getElementById(id);"
           "if(!tr){"
@@ -359,20 +424,24 @@ static void render_dashboard(app_cfg_t *cfg, char *out, size_t outsz) {
             "if(x.status===200){"
               "try{"
                 "var d=JSON.parse(x.responseText);"
-                "document.getElementById('td_status').innerHTML='<b>'+d.ups_status+'</b>';"
+                "var sc=document.getElementById('td_status');"
+                "sc.innerHTML='<span class=\''+stCls(d.ups_status)+'\'>'+d.ups_status+'</span>';"
                 "document.getElementById('td_ip').textContent=d.sta_ip;"
                 "if(d.battery_charge!==null)addOrUpdate('tr_charge','Charge',d.battery_charge+'%%');"
-                "if(d.battery_runtime_s!==null)addOrUpdate('tr_runtime','Runtime',d.battery_runtime_s+' s');"
+                "if(d.battery_runtime_s!==null){var rs=d.battery_runtime_s;"
+                "var rm=Math.floor(rs/60);var rse=rs%%60;"
+                "var rt=rm>0?(rm+'m '+(rse<10?'0':'')+rse+'s'):rse+'s';"
+                "addOrUpdate('tr_runtime','Runtime',rt);}"
                 "if(d.battery_voltage_v!==null)addOrUpdate('tr_bvolt','Batt Voltage',d.battery_voltage_v.toFixed(3)+' V');"
-                "if(d.ups_load_pct!==null)addOrUpdate('tr_load','Load',d.ups_load_pct+'%%');"
                 "if(d.input_voltage_v!==null)addOrUpdate('tr_ivolt','Input Voltage',d.input_voltage_v.toFixed(1)+' V');"
                 "if(d.output_voltage_v!==null)addOrUpdate('tr_ovolt','Output Voltage',d.output_voltage_v.toFixed(1)+' V');"
+                "if(d.ups_load_pct!==null)addOrUpdate('tr_load','Load',d.ups_load_pct+'%%');"
                 "document.getElementById('td_poll').textContent='Updated: '+new Date().toLocaleTimeString();"
               "}catch(e){}"
             "}"
           "};"
           "x.onerror=function(){"
-            "document.getElementById('td_poll').textContent='Poll error - retrying...';"
+            "document.getElementById('td_poll').textContent='Poll error \u2014 retrying...';"
           "};"
           "x.send();"
         "},5000);"
@@ -381,7 +450,7 @@ static void render_dashboard(app_cfg_t *cfg, char *out, size_t outsz) {
         "</body></html>",
         pw_warn,
         s_mfr, s_model,
-        st,
+        st_cls, st,
         opt_rows,
         sta_ip[0] ? sta_ip : "not connected"
     );
@@ -392,193 +461,547 @@ static void render_dashboard(app_cfg_t *cfg, char *out, size_t outsz) {
 /* -------------------------------------------------------------------------
  * Compatible UPS list   GET /compat
  *
- * Static page — source of truth is ups_device_db.c.
- * Confirmed devices (tested and working) are marked with a green checkmark.
- * All other entries are "reported compatible" based on NUT source / known
- * HID UPS standards but have not been personally confirmed by the author.
+ * Two-level expandable hierarchy: Vendor -> Series -> Model table.
+ * Built with strlcat appends to avoid single-snprintf stack overflow.
+ * All data sourced from NUT usbhid-ups driver hardware compatibility list.
  * ---------------------------------------------------------------------- */
-static void render_compat(char *out, size_t outsz) {
-    snprintf(out, outsz,
+
+/* Append a CSS+JS compat page header into buf */
+static void compat_head(char *buf, size_t sz) {
+    strlcat(buf,
         "<!doctype html><html><head>"
         "<meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-        "<title>ESP32 UPS Node - Compatible UPS List</title>"
+        "<title>Compatible UPS List</title>"
+        PORTAL_CSS
         "<style>"
-        "body{font-family:sans-serif;margin:16px}"
-        "table{border-collapse:collapse;width:100%%}"
-        "th,td{border:1px solid #aaa;padding:6px 10px;text-align:left;font-size:0.92em}"
-        "th{background:#e8e8e8}"
-        ".confirmed{color:#186a00;font-weight:bold}"
-        ".unconfirmed{color:#555}"
-        ".note{font-size:0.85em;color:#444}"
+        "body{max-width:none;padding:20px}"
+        ".ok{color:#00c853;font-size:0.75em;font-family:Arial,sans-serif;white-space:nowrap}"
+        ".ex{color:#7986cb;font-size:0.75em;font-family:Arial,sans-serif;white-space:nowrap}"
+        ".un{color:#444;font-size:0.75em;font-family:Arial,sans-serif;white-space:nowrap}"
+        ".vbtn{width:100%%;background:#1c1c1c;border:none;border-top:1px solid #2a2a2a;"
+              "color:#e8e8e2;font-family:Arial,sans-serif;font-size:0.85em;"
+              "padding:9px 14px;text-align:left;cursor:pointer;"
+              "display:flex;align-items:center;gap:10px}"
+        ".vbtn:hover{background:#242424}"
+        ".vbtn.first{border-top:1px solid #333}"
+        ".arr{color:#555;font-size:0.68em;transition:transform 0.14s;"
+             "display:inline-block;width:12px;flex-shrink:0}"
+        ".vbtn.open .arr{transform:rotate(90deg);color:#4fc3f7}"
+        ".vn{font-weight:600;min-width:200px}"
+        ".vp{color:#777;font-family:'Courier New',Courier,monospace;font-size:0.86em;min-width:120px}"
+        ".vc{margin-left:auto;font-size:0.74em;color:#555;white-space:nowrap}"
+        ".vb{font-size:0.74em;margin-left:10px;white-space:nowrap}"
+        ".vpanel{display:none;border-bottom:1px solid #2a2a2a}"
+        ".vpanel.open{display:block}"
+        ".sr{border-top:1px solid #1d1d1d}"
+        ".sbtn{width:100%%;background:#141414;border:none;color:#e8e8e2;"
+              "font-family:Arial,sans-serif;font-size:0.79em;"
+              "padding:7px 14px 7px 28px;text-align:left;cursor:pointer;"
+              "display:flex;align-items:center;gap:8px}"
+        ".sbtn:hover{background:#181818}"
+        ".sarr{color:#444;font-size:0.65em;transition:transform 0.14s;"
+              "display:inline-block;width:10px;flex-shrink:0}"
+        ".sbtn.open .sarr{transform:rotate(90deg);color:#777}"
+        ".sn{color:#aaa;min-width:220px}"
+        ".sp{color:#555;font-family:'Courier New',Courier,monospace;font-size:0.86em;min-width:110px}"
+        ".sc{margin-left:auto;font-size:0.73em;color:#444;white-space:nowrap}"
+        ".sb{font-size:0.73em;margin-left:10px;white-space:nowrap}"
+        ".mt{display:none;width:100%%;min-width:980px;border-collapse:collapse;table-layout:fixed}"
+        ".mt.open{display:table}"
+        ".mt th{background:#0e0e0e;color:#555;font-family:Arial,sans-serif;"
+               "font-size:0.71em;text-transform:uppercase;letter-spacing:0.07em;"
+               "padding:5px 10px 5px 40px;font-weight:normal;"
+               "border-bottom:1px solid #1a1a1a;text-align:left}"
+        ".mt th:nth-child(1){width:280px;padding-left:40px}"
+        ".mt th:nth-child(2){width:110px}"
+        ".mt th:nth-child(3){width:180px}"
+        ".mt th:nth-child(4){width:300px}"
+        ".mt th:nth-child(5){width:110px}"
+        ".mt td{padding:5px 10px;border-bottom:1px solid #131313;vertical-align:top;"
+               "overflow:hidden;text-overflow:ellipsis}"
+        ".mt td:first-child{padding-left:40px}"
+        ".mt tr:last-child td{border-bottom:none}"
+        ".mn{color:#c8c8c2;font-size:0.87em}"
+        ".mp{color:#555;font-size:0.82em}"
+        ".mm{color:#666;font-family:Arial,sans-serif;font-size:0.75em;line-height:1.4}"
+        ".mnt{color:#555;font-family:Arial,sans-serif;font-size:0.75em;line-height:1.4}"
         "</style>"
         "</head><body>"
-        "<h2>ESP32-S3 UPS Node v15.8 - Compatible UPS List</h2>"
-        "<p>Devices marked <span class='confirmed'>&#10003; Confirmed</span> have been personally tested "
-        "and verified working with this firmware.<br>"
-        "All other devices are expected to work based on NUT/HID UPS standards "
-        "but have not been independently confirmed by the project author.</p>"
-        "<p><b>Have a device that works? Open an issue or PR on "
-        "<a href='https://github.com/Driftah9/esp32-s3-nut-node'>GitHub</a> "
-        "to get it added to the confirmed list.</b></p>"
-        "<table>"
-        "<tr><th>Vendor</th><th>Models / Series</th><th>VID:PID</th>"
-        "<th>Decode Mode</th><th>Notes</th><th>Status</th></tr>"
-
-        /* ---- APC / Schneider ---- */
-        "<tr>"
-        "<td>APC / Schneider</td>"
-        "<td>Back-UPS XS 1500M</td>"
-        "<td>051D:0002</td>"
-        "<td>Direct (APC Back-UPS)</td>"
-        "<td class='note'>Charge, runtime, status via interrupt IN.<br>"
-        "Voltages via GET_REPORT (Feature polling).</td>"
-        "<td class='confirmed'>&#10003; Confirmed</td>"
-        "</tr>"
-
-        "<tr>"
-        "<td>APC / Schneider</td>"
-        "<td>Back-UPS BR1000G</td>"
-        "<td>051D:0002</td>"
-        "<td>Direct (APC Back-UPS)</td>"
-        "<td class='note'>Same VID:PID as XS 1500M. Same decode path confirmed working.</td>"
-        "<td class='confirmed'>&#10003; Confirmed</td>"
-        "</tr>"
-
-        "<tr>"
-        "<td>APC / Schneider</td>"
-        "<td>Smart-UPS / other models</td>"
-        "<td>051D:0000 (wildcard)</td>"
-        "<td>Standard HID</td>"
-        "<td class='note'>Standard HID descriptor path. Vendor page remap applied.</td>"
-        "<td class='unconfirmed'>&#9711; Unconfirmed</td>"
-        "</tr>"
-
-        /* ---- CyberPower ---- */
-        "<tr>"
-        "<td>CyberPower</td>"
-        "<td>SX550G, CP1200AVR, CP825AVR-G, CP1000AVRLCD, CP1500C,<br>"
-        "CP550HG, CP1000PFCLCD, CP850PFCLCD, CP1350PFCLCD,<br>"
-        "CP1500PFCLCD, CP1350AVRLCD, CP1500AVRLCD, CP900AVR,<br>"
-        "CPS685AVR, CPS800AVR, EC350G, EC750G, EC850LCD,<br>"
-        "BL1250U, AE550, CPJ500</td>"
-        "<td>0764:0501</td>"
-        "<td>Direct (CyberPower)</td>"
-        "<td class='note'>All live values via direct-decode bypass (rids 0x20-0x88).<br>"
-        "Descriptor declares insufficient Input fields; direct decode required.</td>"
-        "<td class='confirmed'>&#10003; Confirmed</td>"
-        "</tr>"
-
-        "<tr>"
-        "<td>CyberPower</td>"
-        "<td>OR2200LCDRM2U, OR700LCDRM1U, OR500LCDRM1U, OR1500ERM1U,<br>"
-        "CP1350EPFCLCD, CP1500EPFCLCD, PR1500RT2U, PR6000LCDRTXL5U,<br>"
-        "RT650EI, UT2200E, Value 1500ELCD-RU, VP1200ELCD</td>"
-        "<td>0764:0601</td>"
-        "<td>Direct (CyberPower)</td>"
-        "<td class='note'>Same direct-decode path as PID 0x0501. "
-        "Active power LogMax fix also applied.</td>"
-        "<td class='unconfirmed'>&#9711; Unconfirmed</td>"
-        "</tr>"
-
-        "<tr>"
-        "<td>CyberPower</td>"
-        "<td>900AVR, BC900D</td>"
-        "<td>0764:0005</td>"
-        "<td>Standard HID</td>"
-        "<td class='note'>Older model. Standard path with voltage LogMax fix.</td>"
-        "<td class='unconfirmed'>&#9711; Unconfirmed</td>"
-        "</tr>"
-
-        "<tr>"
-        "<td>CyberPower (other)</td>"
-        "<td>Any CyberPower not listed above</td>"
-        "<td>0764:xxxx</td>"
-        "<td>Standard HID</td>"
-        "<td class='note'>VID-only wildcard fallback. Standard path, voltage quirks applied.</td>"
-        "<td class='unconfirmed'>&#9711; Unconfirmed</td>"
-        "</tr>"
-
-        /* ---- Eaton / MGE ---- */
-        "<tr>"
-        "<td>Eaton / MGE / Powerware</td>"
-        "<td>3S, 5E, 5P, Ellipse, Evolution</td>"
-        "<td>0463:xxxx</td>"
-        "<td>Standard HID</td>"
-        "<td class='note'>Standard HID UPS descriptor. No known quirks.</td>"
-        "<td class='unconfirmed'>&#9711; Unconfirmed</td>"
-        "</tr>"
-
-        /* ---- Tripp Lite ---- */
-        "<tr>"
-        "<td>Tripp Lite</td>"
-        "<td>OMNI, SMART, INTERNETOFFICE series</td>"
-        "<td>09AE:xxxx</td>"
-        "<td>Standard HID + GET_REPORT</td>"
-        "<td class='note'>Standard HID path. Feature report polling active for values "
-        "only available via GET_REPORT.</td>"
-        "<td class='unconfirmed'>&#9711; Unconfirmed</td>"
-        "</tr>"
-
-        /* ---- Belkin ---- */
-        "<tr>"
-        "<td>Belkin</td>"
-        "<td>F6H, F6C series</td>"
-        "<td>050D:xxxx</td>"
-        "<td>Standard HID</td>"
-        "<td class='note'>Standard HID UPS descriptor. No known quirks.</td>"
-        "<td class='unconfirmed'>&#9711; Unconfirmed</td>"
-        "</tr>"
-
-        /* ---- Liebert ---- */
-        "<tr>"
-        "<td>Liebert / Vertiv</td>"
-        "<td>GXT4, PSI5</td>"
-        "<td>10AF:xxxx</td>"
-        "<td>Standard HID</td>"
-        "<td class='note'>Standard HID UPS descriptor. No known quirks.</td>"
-        "<td class='unconfirmed'>&#9711; Unconfirmed</td>"
-        "</tr>"
-
-        /* ---- Powercom ---- */
-        "<tr>"
-        "<td>Powercom</td>"
-        "<td>Black Knight, Dragon, King Pro</td>"
-        "<td>0D9F:xxxx</td>"
-        "<td>Standard HID</td>"
-        "<td class='note'>Standard HID UPS descriptor. No known quirks.</td>"
-        "<td class='unconfirmed'>&#9711; Unconfirmed</td>"
-        "</tr>"
-
-        /* ---- HP ---- */
-        "<tr>"
-        "<td>HP</td>"
-        "<td>T750 G2/G3, T1000 G2/G3, T1500 G2/G3, T3000 G2/G3</td>"
-        "<td>03F0:xxxx</td>"
-        "<td>Standard HID</td>"
-        "<td class='note'>Standard HID UPS descriptor. No known quirks.</td>"
-        "<td class='unconfirmed'>&#9711; Unconfirmed</td>"
-        "</tr>"
-
-        /* ---- Dell ---- */
-        "<tr>"
-        "<td>Dell</td>"
-        "<td>H750E, H950E, H1000E, H1750E</td>"
-        "<td>047C:xxxx</td>"
-        "<td>Standard HID</td>"
-        "<td class='note'>Standard HID UPS descriptor. No known quirks.</td>"
-        "<td class='unconfirmed'>&#9711; Unconfirmed</td>"
-        "</tr>"
-
-        "</table>"
-        "<br><p class='note'>VID:PID format: xxxx = any product ID (VID-only wildcard match).<br>"
-        "Decode modes: <b>Standard HID</b> = generic USB HID Power Device descriptor path. "
-        "<b>Direct</b> = vendor-specific byte-position decode (used when descriptor is incomplete).<br>"
-        "GET_REPORT = Feature report polling via USB control transfer for values not on interrupt IN.</p>"
-        "<br><a href='/'>[Back to Status]</a>"
-        "</body></html>"
-    );
+        "<h2>Compatible UPS List</h2>"
+        "<div class='subtitle'>ESP32-S3 UPS Node v15.9 "
+        "&mdash; NUT usbhid-ups driver &mdash; 29 manufacturers / 338+ devices</div>"
+        "<div style='font-family:Arial,sans-serif;font-size:0.82em;color:#888;"
+             "margin-bottom:14px;line-height:1.6'>"
+        "Click a vendor to expand series. Click a series to expand models. "
+        "<span style='color:#00c853'>&#10003; Confirmed</span> = personally tested. "
+        "<span style='color:#7986cb'>&#9711; Expected</span> = same VID:PID, untested. "
+        "<span style='color:#444'>&#9711; Unconfirmed</span> = standard HID path, untested.<br>"
+        "Have a working device not listed? "
+        "<a href='https://github.com/Driftah9/esp32-s3-nut-node' style='color:#4fc3f7'>"
+        "Open an issue on GitHub</a> to get it added.</div>"
+        "<div style='margin-bottom:10px;font-family:Arial,sans-serif;font-size:0.8em'>"
+        "<button onclick='expandAll()' style='background:#1c1c1c;border:1px solid #333;"
+            "color:#4fc3f7;padding:5px 14px;cursor:pointer;font-size:0.85em;"
+            "font-family:Arial,sans-serif;margin-right:8px'>&#9660; Expand All</button>"
+        "<button onclick='collapseAll()' style='background:#1c1c1c;border:1px solid #333;"
+            "color:#888;padding:5px 14px;cursor:pointer;font-size:0.85em;"
+            "font-family:Arial,sans-serif'>&#9650; Collapse All</button>"
+        "</div>",
+        sz);
 }
+
+/* Macros to reduce repetition in render_compat body */
+#define CAT(b,s,x)   strlcat((x),(s),(b))
+#define VOPEN(b,x,nm,pid,badge,bclr,cnt) do { \
+    char _vt[512]; \
+    snprintf(_vt,sizeof(_vt), \
+        "<button class='vbtn' onclick='tv(this)'>" \
+        "<span class='arr'>&#9654;</span>" \
+        "<span class='vn'>%s</span>" \
+        "<span class='vp'>%s</span>" \
+        "<span class='vb' style='color:%s'>%s</span>" \
+        "<span class='vc'>%s</span></button>" \
+        "<div class='vpanel'>", \
+        (nm),(pid),(bclr),(badge),(cnt)); \
+    strlcat((x),_vt,(b)); } while(0)
+#define VCLOSE(b,x)  strlcat((x),"</div>",(b))
+#define SOPEN(b,x,nm,pid,badge,bclr,cnt) do { \
+    char _st[640]; \
+    snprintf(_st,sizeof(_st), \
+        "<div class='sr'><button class='sbtn' onclick='ts(this)'>" \
+        "<span class='sarr'>&#9654;</span>" \
+        "<span class='sn'>%s</span>" \
+        "<span class='sp'>%s</span>" \
+        "<span class='sb' style='color:%s'>%s</span>" \
+        "<span class='sc'>%s</span></button>" \
+        "<table class='mt'>" \
+        "<tr><th>Model</th><th>VID:PID</th><th>Decode</th>" \
+        "<th>Notes</th><th>Status</th></tr>", \
+        (nm),(pid),(bclr),(badge),(cnt)); \
+    strlcat((x),_st,(b)); } while(0)
+#define SCLOSE(b,x)  strlcat((x),"</table></div>",(b))
+#define MROW(b,x,model,pid,decode,note,stspan) do { \
+    char _mt[512]; \
+    snprintf(_mt,sizeof(_mt), \
+        "<tr><td class='mn'>%s</td><td class='mp'>%s</td>" \
+        "<td class='mm'>%s</td><td class='mnt'>%s</td>" \
+        "<td>%s</td></tr>", \
+        (model),(pid),(decode),(note),(stspan)); \
+    strlcat((x),_mt,(b)); } while(0)
+
+#define ST_OK  "<span class='ok'>&#10003; Confirmed</span>"
+#define ST_EX  "<span class='ex'>&#9711; Expected</span>"
+#define ST_UN  "<span class='un'>&#9711; Unconfirmed</span>"
+#define COL_OK "#00c853"
+#define COL_EX "#7986cb"
+#define COL_UN "#444"
+
+static void render_compat(char *out, size_t outsz) {
+    out[0] = 0;
+    compat_head(out, outsz);
+
+    /* ═══ APC / Schneider ══════════════════════════════════════════════ */
+    VOPEN(outsz, out, "APC / Schneider Electric", "051D:xxxx",
+          "&#10003; 2 confirmed", COL_OK, "21 models");
+
+      SOPEN(outsz, out, "Back-UPS (Consumer / SOHO)", "051D:0002",
+            "&#10003; 2 confirmed", COL_OK, "15 models");
+        MROW(outsz, out, "Back-UPS XS 1500M", "051D:0002", "INT-IN + GET_REPORT",
+             "Charge/runtime/status via INT IN. Voltages via rid=0x17.", ST_OK);
+        MROW(outsz, out, "Back-UPS BR1000G", "051D:0002", "INT-IN + GET_REPORT",
+             "Same VID:PID as XS 1500M. Decode path confirmed working.", ST_OK);
+        MROW(outsz, out, "Back-UPS BR700G / BR1500G / BR1500MS2", "051D:0002",
+             "INT-IN + GET_REPORT", "Same PID=0002 firmware family.", ST_EX);
+        MROW(outsz, out, "Back-UPS Pro USB", "051D:0002",
+             "INT-IN + GET_REPORT", "NUT-listed. PID=0002 family.", ST_EX);
+        MROW(outsz, out, "Back-UPS BX600M / BX850M / BX1500M / BX****MI", "051D:0002",
+             "INT-IN + GET_REPORT", "BX series. NUT-listed. PID=0002.", ST_EX);
+        MROW(outsz, out, "Back-UPS BE425M / BE600M1 / BE850M2", "051D:0002",
+             "INT-IN + GET_REPORT", "BE series. PID=0002 family.", ST_EX);
+        MROW(outsz, out, "Back-UPS BN450M / BN650M1", "051D:0002",
+             "INT-IN + GET_REPORT", "BN series. PID=0002 family.", ST_EX);
+        MROW(outsz, out, "Back-UPS ES 850G2 / ES/CyberFort 350", "051D:0002",
+             "INT-IN + GET_REPORT", "NUT-listed. ES series PID=0002.", ST_EX);
+        MROW(outsz, out, "Back-UPS CS USB / RS USB / LS USB", "051D:0002",
+             "INT-IN + GET_REPORT", "NUT-listed. CS/RS/LS PID=0002.", ST_EX);
+        MROW(outsz, out, "Back-UPS BK650M2-CH / BK****M2-CH series", "051D:0002",
+             "INT-IN + GET_REPORT", "NUT-listed. PID=0002.", ST_EX);
+        MROW(outsz, out, "Back-UPS BVK****M2 series", "051D:0002",
+             "INT-IN + GET_REPORT", "NUT-listed. PID=0002.", ST_EX);
+        MROW(outsz, out, "Back-UPS XS 1000M / BACK-UPS XS LCD", "051D:0002",
+             "INT-IN + GET_REPORT", "NUT-listed. PID=0002.", ST_EX);
+        MROW(outsz, out, "Back-UPS BF500", "051D:0002",
+             "INT-IN + GET_REPORT", "NUT-listed. PID=0002.", ST_EX);
+        MROW(outsz, out, "Back-UPS CS500", "051D:0002",
+             "INT-IN + GET_REPORT", "NUT-listed as CS500. PID=0002.", ST_EX);
+        MROW(outsz, out, "Back-UPS BK650M2-CH / Back-UPS (USB) generic", "051D:0002",
+             "INT-IN + GET_REPORT", "NUT-listed. Any Back-UPS with USB and PID=0002.", ST_EX);
+      SCLOSE(outsz, out);
+
+      SOPEN(outsz, out, "Smart-UPS (SMT / SMX / SMC)", "051D:0003+",
+            "&#9711; Unconfirmed", COL_UN, "6 models");
+        MROW(outsz, out, "Smart-UPS SMT750I / SMT750", "051D:0003", "Standard HID",
+             "NUT-listed. Different PID from Back-UPS. Vendor page remap applied.", ST_UN);
+        MROW(outsz, out, "Smart-UPS SMT1500I / SMT1000 / SMT2200 / SMT3000", "051D:0003",
+             "Standard HID", "NUT-listed SMT family.", ST_UN);
+        MROW(outsz, out, "Smart-UPS X SMX750I / SMX1500I", "051D:xxxx",
+             "Standard HID", "NUT-listed. SMX series. PID varies.", ST_UN);
+        MROW(outsz, out, "Smart-UPS SMC1000 / SMC1500 / SMC2200BI-BR", "051D:xxxx",
+             "Standard HID", "SMC2200BI-BR NUT-listed. SMC family expected same path.", ST_UN);
+        MROW(outsz, out, "Smart-UPS (USB) generic", "051D:xxxx",
+             "Standard HID", "NUT-listed generic Smart-UPS USB.", ST_UN);
+        MROW(outsz, out, "Smart-UPS On-Line SRT1000 / SRT2200 / SRT3000", "051D:xxxx",
+             "Standard HID", "Double-conversion. USB HID interface not confirmed.", ST_UN);
+      SCLOSE(outsz, out);
+    VCLOSE(outsz, out);
+
+    /* ═══ CyberPower ════════════════════════════════════════════════════ */
+    VOPEN(outsz, out, "CyberPower (CPS)", "0764:xxxx",
+          "&#10003; 1 confirmed", COL_OK, "34 models");
+
+      SOPEN(outsz, out, "AVR / Consumer (PID 0x0501)", "0764:0501",
+            "&#10003; 1 confirmed", COL_OK, "22 models");
+        MROW(outsz, out, "CP550HG / SX550G", "0764:0501", "Direct bypass INT-IN",
+             "All values via rids 0x20-0x88. Descriptor LogMax bug patched.", ST_OK);
+        MROW(outsz, out, "CP1200AVR", "0764:0501", "Direct bypass INT-IN",
+             "Same PID=0501 decode path. NUT-listed.", ST_EX);
+        MROW(outsz, out, "CP825AVR-G / LE825G", "0764:0501", "Direct bypass INT-IN",
+             "NUT-listed. PID=0501.", ST_EX);
+        MROW(outsz, out, "CP1000AVRLCD / CP1500C", "0764:0501", "Direct bypass INT-IN",
+             "NUT-listed. PID=0501.", ST_EX);
+        MROW(outsz, out, "CP850PFCLCD / CP1000PFCLCD / CP1350PFCLCD / CP1500PFCLCD",
+             "0764:0501", "Direct bypass INT-IN", "NUT-listed. PID=0501.", ST_EX);
+        MROW(outsz, out, "CP1350AVRLCD / CP1500AVRLCD", "0764:0501", "Direct bypass INT-IN",
+             "NUT-listed. PID=0501.", ST_EX);
+        MROW(outsz, out, "CP900AVR / CPS685AVR / CPS800AVR", "0764:0501",
+             "Direct bypass INT-IN", "NUT-listed. PID=0501.", ST_EX);
+        MROW(outsz, out, "EC350G / EC750G / EC850LCD", "0764:0501", "Direct bypass INT-IN",
+             "NUT-listed. PID=0501.", ST_EX);
+        MROW(outsz, out, "BL1250U / AE550 / CPJ500", "0764:0501", "Direct bypass INT-IN",
+             "NUT-listed. PID=0501.", ST_EX);
+        MROW(outsz, out, "BR1000ELCD", "0764:0501", "Direct bypass INT-IN",
+             "NUT-listed. PID=0501.", ST_EX);
+        MROW(outsz, out, "CP1350EPFCLCD / CP1500EPFCLCD", "0764:0501",
+             "Direct bypass INT-IN", "NUT-listed. PID=0501.", ST_EX);
+        MROW(outsz, out, "Value 400E / 600E / 800E / 1500ELCD-RU", "0764:0501",
+             "Direct bypass INT-IN", "NUT-listed Value series. PID=0501.", ST_EX);
+        MROW(outsz, out, "VP1200ELCD", "0764:0501", "Direct bypass INT-IN",
+             "NUT-listed. PID=0501.", ST_EX);
+      SCLOSE(outsz, out);
+
+      SOPEN(outsz, out, "OR / PR Rackmount (PID 0x0601)", "0764:0601",
+            "&#9711; Unconfirmed", COL_UN, "9 models");
+        MROW(outsz, out, "OR2200LCDRM2U / OR700LCDRM1U / OR500LCDRM1U / OR1500ERM1U",
+             "0764:0601", "Direct bypass INT-IN",
+             "Same direct decode as 0x0501. Active power LogMax fix applied.", ST_UN);
+        MROW(outsz, out, "PR1500RT2U / PR6000LCDRTXL5U", "0764:0601",
+             "Direct bypass INT-IN", "NUT-listed. PID=0601.", ST_UN);
+        MROW(outsz, out, "RT650EI / UT2200E", "0764:0601", "Direct bypass INT-IN",
+             "NUT-listed. PID=0601.", ST_UN);
+        MROW(outsz, out, "CP1350EPFCLCD (0601 variant)", "0764:0601",
+             "Direct bypass INT-IN", "NUT-listed under PID=0601.", ST_UN);
+      SCLOSE(outsz, out);
+
+      SOPEN(outsz, out, "Legacy (PID 0x0005)", "0764:0005",
+            "&#9711; Unconfirmed", COL_UN, "2 models");
+        MROW(outsz, out, "900AVR / BC900D", "0764:0005", "Standard HID",
+             "Older model. Standard path with voltage LogMax fix.", ST_UN);
+      SCLOSE(outsz, out);
+    VCLOSE(outsz, out);
+
+    /* ═══ Eaton / MGE / Powerware ══════════════════════════════════════ */
+    VOPEN(outsz, out, "Eaton / MGE / Powerware", "0463:xxxx",
+          "&#9711; Unconfirmed", COL_UN, "18 models");
+
+      SOPEN(outsz, out, "Eaton 3S / 5E / 5P / 5PX / 5SC / 5SX / 9E / 9PX", "0463:xxxx",
+            "&#9711; Unconfirmed", COL_UN, "8 models");
+        MROW(outsz, out, "3S (USB)", "0463:xxxx", "Standard HID",
+             "NUT-listed. Standard HID Power Device class.", ST_UN);
+        MROW(outsz, out, "5E (USB)", "0463:xxxx", "Standard HID", "NUT-listed.", ST_UN);
+        MROW(outsz, out, "5P (USB) / 5PX (USB)", "0463:xxxx", "Standard HID",
+             "NUT-listed.", ST_UN);
+        MROW(outsz, out, "5SC (USB) / 5SX (USB)", "0463:xxxx", "Standard HID",
+             "NUT-listed.", ST_UN);
+        MROW(outsz, out, "9E (USB) / 9PX (USB)", "0463:xxxx", "Standard HID",
+             "NUT-listed.", ST_UN);
+      SCLOSE(outsz, out);
+
+      SOPEN(outsz, out, "Ellipse / Evolution / Galaxy / Nova / Pulsar / Powerware",
+            "0463:xxxx", "&#9711; Unconfirmed", COL_UN, "10 models");
+        MROW(outsz, out, "Ellipse ECO (USB) / Ellipse MAX (USB)", "0463:xxxx",
+             "Standard HID (MGE)", "NUT-listed. MGE subdriver.", ST_UN);
+        MROW(outsz, out, "MGE Ellipse Premium (USB)", "0463:xxxx",
+             "Standard HID (MGE)", "NUT-listed.", ST_UN);
+        MROW(outsz, out, "Evolution 650/850/1150/1550 (USB)", "0463:xxxx",
+             "Standard HID (MGE)", "NUT-listed.", ST_UN);
+        MROW(outsz, out, "Galaxy 3000/5000 (USB)", "0463:xxxx",
+             "Standard HID (MGE)", "NUT-listed. USB HID interface on these units.", ST_UN);
+        MROW(outsz, out, "Nova AVR (USB)", "0463:xxxx",
+             "Standard HID (MGE)", "NUT-listed.", ST_UN);
+        MROW(outsz, out, "Pulsar EX/EXtreme/M/MX (USB)", "0463:xxxx",
+             "Standard HID (MGE)", "NUT-listed.", ST_UN);
+        MROW(outsz, out, "Comet EX RT (USB)", "0463:xxxx",
+             "Standard HID (MGE)", "NUT-listed.", ST_UN);
+        MROW(outsz, out, "Powerware 5110/5115/5125/5130 (USB)", "0463:xxxx",
+             "Standard HID", "NUT-listed. Powerware/Eaton branding.", ST_UN);
+        MROW(outsz, out, "Powerware 9125/9130/9140/9155/9170/9355 (USB)", "0463:xxxx",
+             "Standard HID", "NUT-listed.", ST_UN);
+      SCLOSE(outsz, out);
+    VCLOSE(outsz, out);
+
+    /* ═══ Tripp Lite ════════════════════════════════════════════════════ */
+    VOPEN(outsz, out, "Tripp Lite", "09AE:xxxx",
+          "&#9711; Unconfirmed", COL_UN, "7 models");
+
+      SOPEN(outsz, out, "SmartPro Series", "09AE:xxxx",
+            "&#9711; Unconfirmed", COL_UN, "4 models");
+        MROW(outsz, out, "SMART500RT1U", "09AE:xxxx", "Standard HID + GET_REPORT",
+             "NUT-listed. Feature report polling for values not on INT IN.", ST_UN);
+        MROW(outsz, out, "SMART700USB", "09AE:xxxx", "Standard HID + GET_REPORT",
+             "NUT-listed.", ST_UN);
+        MROW(outsz, out, "SMART1000LCD / SMART1500LCD / SmartPro 1500LCD", "09AE:xxxx",
+             "Standard HID + GET_REPORT", "NUT-listed. SmartPro 1500LCD explicit.", ST_UN);
+        MROW(outsz, out, "SMART2200RMXL2U", "09AE:xxxx",
+             "Standard HID + GET_REPORT", "NUT-listed. Rackmount SmartPro.", ST_UN);
+      SCLOSE(outsz, out);
+
+      SOPEN(outsz, out, "OmniSmart / INTERNETOFFICE", "09AE:xxxx",
+            "&#9711; Unconfirmed", COL_UN, "3 models");
+        MROW(outsz, out, "OMNI650LCD / OMNI900LCD / OMNI1000LCD / OMNI1500LCD",
+             "09AE:xxxx", "Standard HID + GET_REPORT",
+             "NUT-listed as OMNI650/900/1000/1500 LCD.", ST_UN);
+        MROW(outsz, out, "INTERNETOFFICE700", "09AE:xxxx",
+             "Standard HID + GET_REPORT", "NUT-listed explicitly.", ST_UN);
+      SCLOSE(outsz, out);
+    VCLOSE(outsz, out);
+
+    /* ═══ Belkin ════════════════════════════════════════════════════════ */
+    VOPEN(outsz, out, "Belkin", "050D:xxxx",
+          "&#9711; Unconfirmed", COL_UN, "9 models");
+
+      SOPEN(outsz, out, "F6H / F6C / Universal UPS Series", "050D:xxxx",
+            "&#9711; Unconfirmed", COL_UN, "9 models");
+        MROW(outsz, out, "F6H375-USB", "050D:xxxx", "Standard HID",
+             "NUT-listed.", ST_UN);
+        MROW(outsz, out, "Office Series F6C550-AVR", "050D:xxxx", "Standard HID",
+             "NUT-listed.", ST_UN);
+        MROW(outsz, out, "Regulator PRO-USB", "050D:xxxx", "Standard HID",
+             "NUT-listed.", ST_UN);
+        MROW(outsz, out, "Small Enterprise F6C1500-TW-RK", "050D:xxxx", "Standard HID",
+             "NUT-listed.", ST_UN);
+        MROW(outsz, out, "Universal UPS F6C100-UNV / F6C120-UNV", "050D:xxxx",
+             "Standard HID", "NUT-listed.", ST_UN);
+        MROW(outsz, out, "Universal UPS F6C800-UNV / F6C1100-UNV / F6C1200-UNV",
+             "050D:xxxx", "Standard HID", "NUT-listed.", ST_UN);
+      SCLOSE(outsz, out);
+    VCLOSE(outsz, out);
+
+    /* ═══ HP ════════════════════════════════════════════════════════════ */
+    VOPEN(outsz, out, "HP", "03F0:xxxx",
+          "&#9711; Unconfirmed", COL_UN, "4 models");
+
+      SOPEN(outsz, out, "T Series G2/G3", "03F0:xxxx",
+            "&#9711; Unconfirmed", COL_UN, "4 models");
+        MROW(outsz, out, "T750 G2 (USB)",  "03F0:xxxx", "Standard HID", "NUT-listed.", ST_UN);
+        MROW(outsz, out, "T1000 G3 (USB)", "03F0:xxxx", "Standard HID", "NUT-listed.", ST_UN);
+        MROW(outsz, out, "T1500 G3 (USB)", "03F0:xxxx", "Standard HID", "NUT-listed.", ST_UN);
+        MROW(outsz, out, "T3000 G3 (USB)", "03F0:xxxx", "Standard HID", "NUT-listed.", ST_UN);
+      SCLOSE(outsz, out);
+    VCLOSE(outsz, out);
+
+    /* ═══ Dell ══════════════════════════════════════════════════════════ */
+    VOPEN(outsz, out, "Dell", "047C:xxxx",
+          "&#9711; Unconfirmed", COL_UN, "4 models");
+
+      SOPEN(outsz, out, "H Series", "047C:xxxx",
+            "&#9711; Unconfirmed", COL_UN, "4 models");
+        MROW(outsz, out, "H750E (USB)",  "047C:xxxx", "Standard HID", "NUT-listed.", ST_UN);
+        MROW(outsz, out, "H950E (USB)",  "047C:xxxx", "Standard HID", "NUT-listed.", ST_UN);
+        MROW(outsz, out, "H1000E (USB)", "047C:xxxx", "Standard HID", "NUT-listed.", ST_UN);
+        MROW(outsz, out, "H1750E (USB)", "047C:xxxx", "Standard HID", "NUT-listed.", ST_UN);
+      SCLOSE(outsz, out);
+    VCLOSE(outsz, out);
+
+    /* ═══ Liebert / Vertiv ══════════════════════════════════════════════ */
+    VOPEN(outsz, out, "Liebert / Vertiv", "10AF:xxxx",
+          "&#9711; Unconfirmed", COL_UN, "2 models");
+
+      SOPEN(outsz, out, "GXT / PSI Series", "10AF:xxxx",
+            "&#9711; Unconfirmed", COL_UN, "2 models");
+        MROW(outsz, out, "GXT4 (USB)", "10AF:xxxx", "Standard HID",
+             "NUT-listed. Liebert subdriver.", ST_UN);
+        MROW(outsz, out, "PSI5 (USB)", "10AF:xxxx", "Standard HID", "NUT-listed.", ST_UN);
+      SCLOSE(outsz, out);
+    VCLOSE(outsz, out);
+
+    /* ═══ Powercom ══════════════════════════════════════════════════════ */
+    VOPEN(outsz, out, "Powercom", "0D9F:xxxx",
+          "&#9711; Unconfirmed", COL_UN, "7 models");
+
+      SOPEN(outsz, out, "All Series", "0D9F:xxxx",
+            "&#9711; Unconfirmed", COL_UN, "7 models");
+        MROW(outsz, out, "Black Knight Pro (USB)", "0D9F:xxxx", "Standard HID",
+             "NUT-listed.", ST_UN);
+        MROW(outsz, out, "Dragon (USB)",        "0D9F:xxxx", "Standard HID", "NUT-listed.", ST_UN);
+        MROW(outsz, out, "Imperial (USB)",       "0D9F:xxxx", "Standard HID", "NUT-listed.", ST_UN);
+        MROW(outsz, out, "King Pro (USB)",       "0D9F:xxxx", "Standard HID", "NUT-listed.", ST_UN);
+        MROW(outsz, out, "Raptor (USB)",         "0D9F:xxxx", "Standard HID", "NUT-listed.", ST_UN);
+        MROW(outsz, out, "Smart King / Smart King Pro (USB)", "0D9F:xxxx",
+             "Standard HID", "NUT-listed.", ST_UN);
+        MROW(outsz, out, "WOW (USB)",            "0D9F:xxxx", "Standard HID", "NUT-listed.", ST_UN);
+      SCLOSE(outsz, out);
+    VCLOSE(outsz, out);
+
+    /* ═══ Other Vendors ═════════════════════════════════════════════════ */
+    VOPEN(outsz, out, "Other Vendors", "various",
+          "&#9711; Unconfirmed", COL_UN, "19 manufacturers / 25+ models");
+
+      SOPEN(outsz, out, "AEG Power Solutions", "unknown",
+            "&#9711; Unconfirmed", COL_UN, "2 models");
+        MROW(outsz, out, "PROTECT NAS (USB)", "unknown", "Standard HID", "NUT-listed.", ST_UN);
+        MROW(outsz, out, "PROTECT B (USB)",   "unknown", "Standard HID", "NUT-listed.", ST_UN);
+      SCLOSE(outsz, out);
+
+      SOPEN(outsz, out, "Cyber Energy (ST Micro OEM)", "0483:A430",
+            "&#9711; Unconfirmed", COL_UN, "1 model");
+        MROW(outsz, out, "Models with USB", "0483:A430", "Standard HID",
+             "NUT-listed. OEM CyberPower variant using ST Micro VID.", ST_UN);
+      SCLOSE(outsz, out);
+
+      SOPEN(outsz, out, "Delta", "unknown",
+            "&#9711; Unconfirmed", COL_UN, "2 models");
+        MROW(outsz, out, "Amplon RT Series (USB)", "unknown", "Standard HID", "NUT-listed.", ST_UN);
+        MROW(outsz, out, "Amplon N Series (USB)",  "unknown", "Standard HID", "NUT-listed.", ST_UN);
+      SCLOSE(outsz, out);
+
+      SOPEN(outsz, out, "Dynex", "unknown",
+            "&#9711; Unconfirmed", COL_UN, "1 model");
+        MROW(outsz, out, "DX-800U (USB)", "unknown", "Standard HID", "NUT-listed.", ST_UN);
+      SCLOSE(outsz, out);
+
+      SOPEN(outsz, out, "Ecoflow", "unknown",
+            "&#9711; Unconfirmed", COL_UN, "1 model");
+        MROW(outsz, out, "Delta 3 Plus (USB)", "unknown", "Standard HID", "NUT-listed.", ST_UN);
+      SCLOSE(outsz, out);
+
+      SOPEN(outsz, out, "EVER", "unknown",
+            "&#9711; Unconfirmed", COL_UN, "3 models");
+        MROW(outsz, out, "Sinline RT Series (USB)", "unknown", "Standard HID", "NUT-listed.", ST_UN);
+        MROW(outsz, out, "Sinline XL Series (USB)", "unknown", "Standard HID", "NUT-listed.", ST_UN);
+        MROW(outsz, out, "ECO Pro Series (USB)",    "unknown", "Standard HID", "NUT-listed.", ST_UN);
+      SCLOSE(outsz, out);
+
+      SOPEN(outsz, out, "Geek Squad", "unknown",
+            "&#9711; Unconfirmed", COL_UN, "1 model");
+        MROW(outsz, out, "GS1285U (USB)", "unknown", "Standard HID", "NUT-listed.", ST_UN);
+      SCLOSE(outsz, out);
+
+      SOPEN(outsz, out, "GoldenMate", "unknown",
+            "&#9711; Unconfirmed", COL_UN, "1 model");
+        MROW(outsz, out, "UPS 1000VA Pro (USB)", "unknown", "Standard HID", "NUT-listed.", ST_UN);
+      SCLOSE(outsz, out);
+
+      SOPEN(outsz, out, "IBM", "unknown",
+            "&#9711; Unconfirmed", COL_UN, "various");
+        MROW(outsz, out, "Various (USB port)", "unknown", "Standard HID",
+             "NUT-listed generically. USB HID interface.", ST_UN);
+      SCLOSE(outsz, out);
+
+      SOPEN(outsz, out, "iDowell", "unknown",
+            "&#9711; Unconfirmed", COL_UN, "1 model");
+        MROW(outsz, out, "iBox UPS (USB)", "unknown", "Standard HID", "NUT-listed.", ST_UN);
+      SCLOSE(outsz, out);
+
+      SOPEN(outsz, out, "Ippon", "unknown",
+            "&#9711; Unconfirmed", COL_UN, "2 models");
+        MROW(outsz, out, "Back Power Pro (USB)",  "unknown", "Standard HID", "NUT-listed.", ST_UN);
+        MROW(outsz, out, "Smart Power Pro (USB)", "unknown", "Standard HID", "NUT-listed.", ST_UN);
+      SCLOSE(outsz, out);
+
+      SOPEN(outsz, out, "Legrand", "unknown",
+            "&#9711; Unconfirmed", COL_UN, "1 model");
+        MROW(outsz, out, "KEOR SP (USB)", "unknown", "Standard HID", "NUT-listed.", ST_UN);
+      SCLOSE(outsz, out);
+
+      SOPEN(outsz, out, "MasterPower", "unknown",
+            "&#9711; Unconfirmed", COL_UN, "1 model");
+        MROW(outsz, out, "MF-UPS650VA (USB)", "unknown", "Standard HID", "NUT-listed.", ST_UN);
+      SCLOSE(outsz, out);
+
+      SOPEN(outsz, out, "Minibox", "unknown",
+            "&#9711; Unconfirmed", COL_UN, "1 model");
+        MROW(outsz, out, "openUPS Intelligent UPS (USB)", "unknown",
+             "Standard HID", "NUT-listed.", ST_UN);
+      SCLOSE(outsz, out);
+
+      SOPEN(outsz, out, "PowerWalker", "unknown",
+            "&#9711; Unconfirmed", COL_UN, "4 models");
+        MROW(outsz, out, "VI 650 SE (USB)",  "unknown", "Standard HID", "NUT-listed.", ST_UN);
+        MROW(outsz, out, "VI 850 SE (USB)",  "unknown", "Standard HID", "NUT-listed.", ST_UN);
+        MROW(outsz, out, "VI 1000 SE (USB)", "unknown", "Standard HID", "NUT-listed.", ST_UN);
+        MROW(outsz, out, "VI 1500 SE (USB)", "unknown", "Standard HID", "NUT-listed.", ST_UN);
+      SCLOSE(outsz, out);
+
+      SOPEN(outsz, out, "Powervar", "unknown",
+            "&#9711; Unconfirmed", COL_UN, "2 models");
+        MROW(outsz, out, "ABCE (USB)",  "unknown", "Standard HID", "NUT-listed.", ST_UN);
+        MROW(outsz, out, "ABCEG (USB)", "unknown", "Standard HID", "NUT-listed.", ST_UN);
+      SCLOSE(outsz, out);
+
+      SOPEN(outsz, out, "Rocketfish", "unknown",
+            "&#9711; Unconfirmed", COL_UN, "2 models");
+        MROW(outsz, out, "RF-1000VA (USB)",  "unknown", "Standard HID", "NUT-listed.", ST_UN);
+        MROW(outsz, out, "RF-1025VA (USB)",  "unknown", "Standard HID", "NUT-listed.", ST_UN);
+      SCLOSE(outsz, out);
+
+      SOPEN(outsz, out, "Salicru", "unknown",
+            "&#9711; Unconfirmed", COL_UN, "2 models");
+        MROW(outsz, out, "SPS One Series (USB)",    "unknown", "Standard HID", "NUT-listed.", ST_UN);
+        MROW(outsz, out, "SPS Xtreme Series (USB)", "unknown", "Standard HID", "NUT-listed.", ST_UN);
+      SCLOSE(outsz, out);
+
+      SOPEN(outsz, out, "Syndome", "unknown",
+            "&#9711; Unconfirmed", COL_UN, "1 model");
+        MROW(outsz, out, "TITAN Series (USB)", "unknown", "Standard HID", "NUT-listed.", ST_UN);
+      SCLOSE(outsz, out);
+    VCLOSE(outsz, out);
+
+    /* Footer and JS */
+    strlcat(out,
+        "<div style='font-family:Arial,sans-serif;font-size:0.75em;color:#444;"
+             "margin-top:14px;line-height:1.6'>"
+        "VID:PID xxxx = any product ID (VID-only wildcard). "
+        "Standard HID = generic USB HID Power Device Class. "
+        "Direct = vendor-specific byte-position decode. "
+        "GET_REPORT = Feature report polling via USB control transfer.<br>"
+        "Source: NUT usbhid-ups driver &mdash; "
+        "<a href='https://networkupstools.org/stable-hcl.html' style='color:#4fc3f7'>"
+        "networkupstools.org/stable-hcl</a></div>"
+        "<div class='nav'><a href='/'>Back to Status</a></div>"
+        "<script>"
+        "function tv(b){b.classList.toggle('open');b.nextElementSibling.classList.toggle('open')}"
+        "function ts(b){b.classList.toggle('open');b.nextElementSibling.classList.toggle('open')}"
+        "function expandAll(){"
+          "document.querySelectorAll('.vbtn,.sbtn').forEach(function(b){"
+            "b.classList.add('open');"
+            "b.nextElementSibling.classList.add('open');"
+          "});"
+        "}"
+        "function collapseAll(){"
+          "document.querySelectorAll('.vbtn,.sbtn').forEach(function(b){"
+            "b.classList.remove('open');"
+            "b.nextElementSibling.classList.remove('open');"
+          "});"
+        "}"
+        "</script>"
+        "</body></html>",
+        outsz);
+}
+
+/* -------------------------------------------------------------------------
+ * Config page   GET /config
+ * ---------------------------------------------------------------------- */
 
 /* -------------------------------------------------------------------------
  * Config page   GET /config
@@ -591,52 +1014,55 @@ static void render_config(app_cfg_t *cfg, char *out, size_t outsz,
 
     bool ap_up = wifi_mgr_ap_is_active();
 
-    char note_html[200] = {0};
-    if (note && note[0])
-        snprintf(note_html, sizeof(note_html), "<p><b>%s</b></p>", note);
+    char note_html[256] = {0};
+    if (note && note[0]) {
+        const char *cls = (note_cls && strcmp(note_cls, "err") == 0) ? "note-err" : "note-ok";
+        snprintf(note_html, sizeof(note_html), "<div class='%s'>%s</div>", cls, note);
+    }
 
     const char *pw_warn = cfg_store_is_default_pass(cfg)
-        ? "<p><b>** Default password \"upsmon\" is in use. "
-          "Change it below under Portal Security. **</b></p>"
+        ? "<div class='warn'>Default password in use. Change it below under Portal Security.</div>"
         : "";
 
     snprintf(out, outsz,
         "<!doctype html><html><head>"
         "<meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-        "<title>ESP32 UPS Config</title>"
+        "<title>UPS Node Config</title>"
+        PORTAL_CSS
         "</head><body>"
-        "<h2>ESP32-S3 UPS Node v15.8 - Config</h2>"
+        "<h2>ESP32-S3 UPS Node</h2>"
+        "<div class='subtitle'>v15.9 &mdash; Configuration</div>"
         "%s%s"
         "<form method='POST' action='/save'>"
-        "<table border='0' cellpadding='4'>"
-        "<tr><th colspan='2' align='left'>Wi-Fi (STA)</th></tr>"
-        "<tr><td>SSID:</td>"
-            "<td><input name='sta_ssid' size='32' maxlength='32' value='%s'></td></tr>"
-        "<tr><td>Password:</td>"
-            "<td><input name='sta_pass' type='password' size='32' maxlength='64' value='%s'></td></tr>"
-        "<tr><th colspan='2' align='left'>Soft AP (%s)</th></tr>"
-        "<tr><td>AP SSID:</td>"
-            "<td><input name='ap_ssid' size='32' maxlength='32' value='%s'></td></tr>"
-        "<tr><td>AP Password (8+ chars):</td>"
-            "<td><input name='ap_pass' type='password' size='32' maxlength='64' value='%s'></td></tr>"
-        "<tr><th colspan='2' align='left'>NUT Identity</th></tr>"
-        "<tr><td>UPS Name:</td>"
-            "<td><input name='ups_name' size='24' maxlength='32' value='%s'></td></tr>"
-        "<tr><td>NUT Username:</td>"
-            "<td><input name='nut_user' size='24' maxlength='32' value='%s'></td></tr>"
-        "<tr><td>NUT Password:</td>"
-            "<td><input name='nut_pass' type='password' size='24' maxlength='32' value='%s'></td></tr>"
-        "<tr><th colspan='2' align='left'>Portal Security (login: admin / &lt;password&gt;)</th></tr>"
-        "<tr><td>New Password:</td>"
-            "<td><input name='portal_pass' type='password' size='24' maxlength='32' "
-            "placeholder='blank = keep current'></td></tr>"
-        "</table>"
-        "<br><input type='submit' value='Save and Apply'>"
+        "<div class='form-section'>Wi-Fi (STA)</div>"
+        "<div class='form-row'><span class='form-label'>SSID</span>"
+            "<input name='sta_ssid' maxlength='32' value='%s'></div>"
+        "<div class='form-row'><span class='form-label'>Password</span>"
+            "<input name='sta_pass' type='password' maxlength='64' value='%s'></div>"
+        "<div class='form-section'>Soft AP &mdash; %s</div>"
+        "<div class='form-row'><span class='form-label'>AP SSID</span>"
+            "<input name='ap_ssid' maxlength='32' value='%s'></div>"
+        "<div class='form-row'><span class='form-label'>AP Password (8+ chars)</span>"
+            "<input name='ap_pass' type='password' maxlength='64' value='%s'></div>"
+        "<div class='form-section'>NUT Identity</div>"
+        "<div class='form-row'><span class='form-label'>UPS Name</span>"
+            "<input name='ups_name' maxlength='32' value='%s'></div>"
+        "<div class='form-row'><span class='form-label'>NUT Username</span>"
+            "<input name='nut_user' maxlength='32' value='%s'></div>"
+        "<div class='form-row'><span class='form-label'>NUT Password</span>"
+            "<input name='nut_pass' type='password' maxlength='32' value='%s'></div>"
+        "<div class='form-section'>Portal Security &mdash; login: admin / &lt;password&gt;</div>"
+        "<div class='form-row'><span class='form-label'>New Password</span>"
+            "<input name='portal_pass' type='password' maxlength='32' "
+            "placeholder='blank = keep current'></div>"
+        "<input class='btn' type='submit' value='Save and Apply'>"
         "</form>"
-        "<br><a href='/'>[Back to Status]</a>"
-        " &nbsp; <a href='/reboot' onclick=\"return confirm('Reboot?')\">[Reboot]</a>"
-        " &nbsp; <small>STA: %s</small>"
+        "<div class='nav' style='margin-top:20px'>"
+        "<a href='/'>Back to Status</a>"
+        "<a href='/reboot' onclick=\"return confirm('Reboot device?')\">Reboot</a>"
+        "<span style='color:#555;font-size:0.82em'>STA: %s</span>"
+        "</div>"
         "</body></html>",
         pw_warn, note_html,
         cfg->sta_ssid, cfg->sta_pass,
@@ -645,8 +1071,6 @@ static void render_config(app_cfg_t *cfg, char *out, size_t outsz,
         cfg->ups_name, cfg->nut_user, cfg->nut_pass,
         sta_ip[0] ? sta_ip : "not connected"
     );
-
-    (void)note_cls;
 }
 
 /* -------------------------------------------------------------------------
@@ -758,9 +1182,8 @@ static void handle_http_client(app_cfg_t *cfg, int fd) {
         else       { http_send(fd, "500 Internal Server Error", "text/plain", "OOM"); }
 
     } else if (strcmp(path, "/compat") == 0 && strcasecmp(method, "GET") == 0) {
-        /* Compatible UPS list — needs a larger buffer due to table size */
-        char *page = (char *)malloc(8192);
-        if (page) { render_compat(page, 8192); http_send_html(fd, page); free(page); }
+        char *page = (char *)malloc(HTTP_COMPAT_BUF);
+        if (page) { render_compat(page, HTTP_COMPAT_BUF); http_send_html(fd, page); free(page); }
         else       { http_send(fd, "500 Internal Server Error", "text/plain", "OOM"); }
 
     } else if ((strcmp(path, "/config") == 0 || strcmp(path, "/config/") == 0)

@@ -21,3 +21,6 @@ main/.project
 Thumbs.db
 .DS_Store
 
+# Claude workspace
+.claude/
+
