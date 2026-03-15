@@ -34,11 +34,25 @@
               battery.charge.low already existed
               device.type       (static: "ups")
             DRIVER_VERSION bumped to 15.8.
+ R14 v15.12 Full NUT variable parity — serve all standard NUT variables
+            that real usbhid-ups exposes for confirmed devices:
+              battery.voltage.nominal   (from DB per device)
+              battery.runtime.low       (from DB per device)
+              battery.charge.warning    (from DB per device)
+              input.voltage.nominal     (from DB per device)
+              ups.type                  (from DB per device)
+              ups.test.result           (static: No test initiated)
+              ups.delay.shutdown        (static: 20)
+              ups.delay.start           (static: 30)
+              ups.timer.reboot          (static: -1)
+              ups.timer.shutdown        (static: -1)
+            DRIVER_VERSION bumped to 15.12.
 
 ============================================================================*/
 
 #include "nut_server.h"
 #include "ups_state.h"
+#include "ups_device_db.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -53,7 +67,7 @@
 
 static const char *TAG = "nut_server";
 static const char *DRIVER_NAME    = "esp32-nut-hid";
-static const char *DRIVER_VERSION = "15.8";
+static const char *DRIVER_VERSION = "15.12";
 static const char *DEVICE_TYPE    = "ups";              /* standard NUT device.type value */
 static const char *BATTERY_TYPE   = "PbAc";          /* sealed lead-acid — all APC Back-UPS */
 static const char *UPS_TYPE       = "line-interactive"; /* all Back-UPS series */
@@ -109,16 +123,35 @@ static const char *safe_or_unknown(const char *s)
 
 static void emit_var_list(int fd, const char *ups, const ups_state_t *st)
 {
+    /* Look up device DB entry for static NUT variables */
+    const ups_device_entry_t *db = ups_device_db_lookup(st->vid, st->pid);
+
+    /* Determine ups.type: DB entry overrides static default */
+    const char *ups_type_str = (db && db->ups_type) ? db->ups_type : UPS_TYPE;
+
     /* --- Battery --- */
     nut_sendf(fd, "VAR %s battery.charge \"%u\"\n",     ups, (unsigned)st->battery_charge);
-    nut_sendf(fd, "VAR %s battery.charge.low \"%u\"\n", ups, (unsigned)st->battery_charge_low);
-    nut_sendf(fd, "VAR %s battery.type \"%s\"\n",       ups, BATTERY_TYPE);
+    nut_sendf(fd, "VAR %s battery.charge.low \"%u\"\n",
+              ups, db ? (unsigned)db->battery_charge_low : (unsigned)st->battery_charge_low);
+    if (db && db->battery_charge_warning) {
+        nut_sendf(fd, "VAR %s battery.charge.warning \"%u\"\n",
+                  ups, (unsigned)db->battery_charge_warning);
+    }
+    nut_sendf(fd, "VAR %s battery.type \"%s\"\n", ups, BATTERY_TYPE);
     if (st->battery_runtime_valid) {
         nut_sendf(fd, "VAR %s battery.runtime \"%u\"\n", ups, (unsigned)st->battery_runtime_s);
+    }
+    if (db && db->battery_runtime_low_s) {
+        nut_sendf(fd, "VAR %s battery.runtime.low \"%u\"\n",
+                  ups, (unsigned)db->battery_runtime_low_s);
     }
     if (st->battery_voltage_valid) {
         nut_sendf(fd, "VAR %s battery.voltage \"%.3f\"\n", ups,
                   (double)st->battery_voltage_mv / 1000.0);
+    }
+    if (db && db->battery_voltage_nominal_mv) {
+        nut_sendf(fd, "VAR %s battery.voltage.nominal \"%.1f\"\n",
+                  ups, (double)db->battery_voltage_nominal_mv / 1000.0);
     }
 
     /* --- Input / Output --- */
@@ -128,15 +161,20 @@ static void emit_var_list(int fd, const char *ups, const ups_state_t *st)
         nut_sendf(fd, "VAR %s input.voltage \"%.1f\"\n", ups,
                   (double)st->input_voltage_mv / 1000.0);
     }
+    if (db && db->input_voltage_nominal_v) {
+        nut_sendf(fd, "VAR %s input.voltage.nominal \"%u\"\n",
+                  ups, (unsigned)db->input_voltage_nominal_v);
+    }
     if (st->output_voltage_valid) {
         nut_sendf(fd, "VAR %s output.voltage \"%.1f\"\n", ups,
                   (double)st->output_voltage_mv / 1000.0);
     }
+
     /* --- UPS status and metrics --- */
     nut_sendf(fd, "VAR %s ups.status \"%s\"\n",  ups,
               st->ups_status[0] ? st->ups_status : "UNKNOWN");
     nut_sendf(fd, "VAR %s ups.flags \"0x%08X\"\n", ups, (unsigned)st->ups_flags);
-    nut_sendf(fd, "VAR %s ups.type \"%s\"\n",    ups, UPS_TYPE);
+    nut_sendf(fd, "VAR %s ups.type \"%s\"\n",    ups, ups_type_str);
     nut_sendf(fd, "VAR %s device.type \"%s\"\n", ups, DEVICE_TYPE);
     if (st->ups_firmware[0]) {
         nut_sendf(fd, "VAR %s ups.firmware \"%s\"\n", ups, st->ups_firmware);
@@ -144,6 +182,12 @@ static void emit_var_list(int fd, const char *ups, const ups_state_t *st)
     if (st->ups_load_valid) {
         nut_sendf(fd, "VAR %s ups.load \"%u\"\n", ups, (unsigned)st->ups_load_pct);
     }
+    /* Standard NUT timer/test vars — expected by NUT clients (apcupsd-compat, HA) */
+    nut_sendf(fd, "VAR %s ups.test.result \"No test initiated\"\n", ups);
+    nut_sendf(fd, "VAR %s ups.delay.shutdown \"20\"\n",   ups);
+    nut_sendf(fd, "VAR %s ups.delay.start \"30\"\n",      ups);
+    nut_sendf(fd, "VAR %s ups.timer.reboot \"-1\"\n",     ups);
+    nut_sendf(fd, "VAR %s ups.timer.shutdown \"-1\"\n",   ups);
 
     /* --- Device identity --- */
     nut_sendf(fd, "VAR %s device.mfr \"%s\"\n",    ups, safe_or_unknown(st->manufacturer));

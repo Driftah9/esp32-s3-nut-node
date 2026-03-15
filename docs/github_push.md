@@ -28,7 +28,7 @@ v15.12
 - rid=0x21 CyberPower runtime fixed: 16-bit LE seconds, authoritative source
 - rid=0x82 silenced: static 300s threshold, was incorrectly decoded as runtime
 - APC Smart-UPS PID 0x0003 added to device DB with non-standard UID mappings
-- ups_usb_hid.c v15.12: graceful USB hot-unplug — fixes hub.c:837 assert
-  - s_cleanup_pending flag blocks intr_in_cb resubmit on DEV_GONE
-  - usb_lib_task uses 50ms timeout + vTaskDelay(1) yield for cleanup ordering
-  - cleanup_device() calls usb_host_device_close() after vTaskDelay(20) guard
+- ups_usb_hid.c: graceful USB hot-unplug fix for hub.c:837 assert on DEV_GONE
+- NUT variable parity: added battery.voltage.nominal, battery.runtime.low, battery.charge.warning, input.voltage.nominal, ups.type, ups.test.result, ups.delay.shutdown, ups.timer.reboot per device from DB
+- ups_device_db: NUT static fields added to all 12 device entries (confirmed + expected)
+- nut_server: driver version 15.12, all new NUT variables served and confirmed in HA

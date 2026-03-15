@@ -16,6 +16,11 @@
 
  VERSION HISTORY
  R0  v15.4  Initial — extracted from ups_hid_parser.c hardcoded logic.
+ R1  v15.12 Added NUT static fields per device:
+            battery_voltage_nominal_mv, battery_runtime_low_s,
+            battery_charge_low, battery_charge_warning,
+            input_voltage_nominal_v, ups_type.
+            Enables full NUT variable parity for confirmed devices.
 
 ============================================================================*/
 #pragma once
@@ -62,6 +67,19 @@ typedef struct {
     ups_decode_mode_t  decode_mode;  /* How to decode interrupt-IN reports  */
     uint32_t           quirks;       /* QUIRK_* bitmask                     */
     bool               known_good;   /* true = confirmed working standard   */
+
+    /* ---- NUT static variables ----------------------------------------
+     * These are served as NUT LIST VAR responses even when the live
+     * decode path cannot read them from the device in real time.
+     * Values sourced from NUT DDL / device datasheets.
+     * 0 = not known / do not serve this variable for this device.
+     */
+    uint32_t  battery_voltage_nominal_mv;  /* battery.voltage.nominal (mV) */
+    uint32_t  battery_runtime_low_s;       /* battery.runtime.low (seconds) */
+    uint8_t   battery_charge_low;          /* battery.charge.low (%)        */
+    uint8_t   battery_charge_warning;      /* battery.charge.warning (%)    */
+    uint16_t  input_voltage_nominal_v;     /* input.voltage.nominal (V)     */
+    const char *ups_type;                  /* ups.type string, NULL=default */
 } ups_device_entry_t;
 
 /* ---- Public API ------------------------------------------------------ */

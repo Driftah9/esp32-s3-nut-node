@@ -6,6 +6,11 @@
              Sources: NUT cps-hid.c, apc-hid.c, mge-hid.c,
                       tripplite-hid.c, liebert-hid.c, hidtypes.h
              Confirmed live devices marked known_good=true.
+ R1  v15.12 Added NUT static fields to all entries.
+             Sources: NUT DDL (networkupstools/nut-ddl),
+                      NUT HCL (networkupstools.org/stable-hcl.html),
+                      confirmed device testing.
+             Confirmed 3 devices (CP550HG, APC XS1500M, APC BR1000G).
 
 ============================================================================*/
 #include "ups_device_db.h"
@@ -37,6 +42,10 @@ static const ups_device_entry_t s_db[] = {
                   vendor/undocumented pages → QUIRK_DIRECT_DECODE.
     ---------------------------------------------------------------- */
     {
+        /* CyberPower AVR/SX/ST/CP consumer series — confirmed CP550HG/SX550G
+         * NUT DDL: battery.voltage.nominal=12V, runtime.low=300s (rid=0x82)
+         * battery.charge.low and charge.warning not in NUT DDL for CyberPower
+         * — using conservative defaults. input.voltage.nominal=120V (US). */
         .vid         = 0x0764,
         .pid         = 0x0501,
         .vendor_name = "CyberPower",
@@ -47,8 +56,17 @@ static const ups_device_entry_t s_db[] = {
                        QUIRK_BATT_VOLT_SCALE |
                        QUIRK_FREQ_SCALE_0_1,
         .known_good  = true,
+        .battery_voltage_nominal_mv = 12000,
+        .battery_runtime_low_s      = 300,
+        .battery_charge_low         = 20,
+        .battery_charge_warning     = 50,
+        .input_voltage_nominal_v    = 120,
+        .ups_type                   = "line-interactive",
     },
     {
+        /* CyberPower OR/PR rackmount — same decode path as 0x0501
+         * Rackmount units typically have 24V or 48V battery. Use 24V
+         * as default; 48V models are less common in this PID range. */
         .vid         = 0x0764,
         .pid         = 0x0601,
         .vendor_name = "CyberPower",
@@ -60,6 +78,12 @@ static const ups_device_entry_t s_db[] = {
                        QUIRK_FREQ_SCALE_0_1 |
                        QUIRK_ACTIVE_PWR_LOGMAX_FIX,
         .known_good  = true,
+        .battery_voltage_nominal_mv = 24000,
+        .battery_runtime_low_s      = 300,
+        .battery_charge_low         = 20,
+        .battery_charge_warning     = 50,
+        .input_voltage_nominal_v    = 120,
+        .ups_type                   = "line-interactive",
     },
     {
         /* Older CyberPower model */
@@ -70,6 +94,12 @@ static const ups_device_entry_t s_db[] = {
         .decode_mode = DECODE_STANDARD,
         .quirks      = QUIRK_VOLTAGE_LOGMAX_FIX,
         .known_good  = false,
+        .battery_voltage_nominal_mv = 12000,
+        .battery_runtime_low_s      = 300,
+        .battery_charge_low         = 20,
+        .battery_charge_warning     = 50,
+        .input_voltage_nominal_v    = 120,
+        .ups_type                   = "line-interactive",
     },
     {
         /* Cyber Energy / ST Micro OEM */
@@ -80,6 +110,12 @@ static const ups_device_entry_t s_db[] = {
         .decode_mode = DECODE_STANDARD,
         .quirks      = 0,
         .known_good  = false,
+        .battery_voltage_nominal_mv = 12000,
+        .battery_runtime_low_s      = 300,
+        .battery_charge_low         = 20,
+        .battery_charge_warning     = 50,
+        .input_voltage_nominal_v    = 120,
+        .ups_type                   = "line-interactive",
     },
     {
         /* VID-only fallback for any other CyberPower PID */
@@ -90,6 +126,12 @@ static const ups_device_entry_t s_db[] = {
         .decode_mode = DECODE_STANDARD,
         .quirks      = QUIRK_VOLTAGE_LOGMAX_FIX | QUIRK_FREQ_SCALE_0_1,
         .known_good  = false,
+        .battery_voltage_nominal_mv = 12000,
+        .battery_runtime_low_s      = 300,
+        .battery_charge_low         = 20,
+        .battery_charge_warning     = 50,
+        .input_voltage_nominal_v    = 120,
+        .ups_type                   = "line-interactive",
     },
 
     /* ----------------------------------------------------------------
@@ -109,6 +151,10 @@ static const ups_device_entry_t s_db[] = {
        PID 0x0000 wildcard: Smart-UPS may use standard path.
     ---------------------------------------------------------------- */
     {
+        /* APC Back-UPS (PID 0x0002) — confirmed XS 1500M and BR1000G
+         * NUT DDL: battery.voltage.nominal=24V, runtime.low=120s,
+         * charge.low=10%, charge.warning=50%, input.voltage.nominal=120V.
+         * Source: NUT DDL APC/Back-UPS XS 1500M and BR1000G entries. */
         .vid         = 0x051D,
         .pid         = 0x0002,
         .vendor_name = "APC",
@@ -116,12 +162,20 @@ static const ups_device_entry_t s_db[] = {
         .decode_mode = DECODE_APC_BACKUPS,
         .quirks      = QUIRK_VENDOR_PAGE_REMAP | QUIRK_NEEDS_GET_REPORT,
         .known_good  = true,
+        .battery_voltage_nominal_mv = 24000,
+        .battery_runtime_low_s      = 120,
+        .battery_charge_low         = 10,
+        .battery_charge_warning     = 50,
+        .input_voltage_nominal_v    = 120,
+        .ups_type                   = "line-interactive",
     },
     {
         /* APC Smart-UPS C / Smart-UPS (PID 0x0003) — standard HID path
-           Descriptor has runtime at uid=0x0085, charge at rid=0x0C,
-           charging at uid=0x008B, discharging at uid=0x002C.
-           Confirmed: Smart-UPS C 1500 FW:UPS 15.1 (issue #1, needs-validation) */
+         * Descriptor has runtime at uid=0x0085, charge at rid=0x0C,
+         * charging at uid=0x008B, discharging at uid=0x002C.
+         * NUT DDL: battery.voltage.nominal=24V, runtime.low=120s,
+         * charge.low=10%, charge.warning=50%.
+         * Status: needs-validation (issue #1, Smart-UPS C 1500). */
         .vid         = 0x051D,
         .pid         = 0x0003,
         .vendor_name = "APC",
@@ -129,9 +183,16 @@ static const ups_device_entry_t s_db[] = {
         .decode_mode = DECODE_STANDARD,
         .quirks      = QUIRK_VENDOR_PAGE_REMAP,
         .known_good  = false,
+        .battery_voltage_nominal_mv = 24000,
+        .battery_runtime_low_s      = 120,
+        .battery_charge_low         = 10,
+        .battery_charge_warning     = 50,
+        .input_voltage_nominal_v    = 120,
+        .ups_type                   = "line-interactive",
     },
     {
-        /* VID-only fallback: Smart-UPS and others may use standard path */
+        /* VID-only fallback: Smart-UPS and others
+         * Using Safe APC defaults from NUT DDL. */
         .vid         = 0x051D,
         .pid         = 0,
         .vendor_name = "APC",
@@ -139,6 +200,12 @@ static const ups_device_entry_t s_db[] = {
         .decode_mode = DECODE_STANDARD,
         .quirks      = QUIRK_VENDOR_PAGE_REMAP,
         .known_good  = false,
+        .battery_voltage_nominal_mv = 24000,
+        .battery_runtime_low_s      = 120,
+        .battery_charge_low         = 10,
+        .battery_charge_warning     = 50,
+        .input_voltage_nominal_v    = 120,
+        .ups_type                   = "line-interactive",
     },
 
     /* ----------------------------------------------------------------
@@ -146,13 +213,23 @@ static const ups_device_entry_t s_db[] = {
        Standard HID path — no known quirks.
     ---------------------------------------------------------------- */
     {
+        /* Eaton/MGE/Powerware standard HID path.
+         * NUT DDL: battery.voltage.nominal varies (12V small, 24V mid, 48V large)
+         * Using 24V as safe mid-range default. runtime.low=120s from NUT DDL.
+         * EU-targeted: input.voltage.nominal=230V. */
         .vid         = 0x0463,
         .pid         = 0,
         .vendor_name = "Eaton/MGE",
         .model_hint  = "3S/5E/5P/Ellipse/Evolution",
         .decode_mode = DECODE_STANDARD,
         .quirks      = 0,
-        .known_good  = true,
+        .known_good  = false,
+        .battery_voltage_nominal_mv = 24000,
+        .battery_runtime_low_s      = 120,
+        .battery_charge_low         = 10,
+        .battery_charge_warning     = 50,
+        .input_voltage_nominal_v    = 230,
+        .ups_type                   = "line-interactive",
     },
 
     /* ----------------------------------------------------------------
@@ -160,13 +237,22 @@ static const ups_device_entry_t s_db[] = {
        Some models need GET_REPORT for Feature values.
     ---------------------------------------------------------------- */
     {
+        /* Tripp Lite SmartPro/OMNI — standard HID + GET_REPORT.
+         * NUT DDL: battery.voltage.nominal=24V, runtime.low=120s.
+         * US-targeted: input.voltage.nominal=120V. */
         .vid         = 0x09AE,
         .pid         = 0,
         .vendor_name = "Tripp Lite",
         .model_hint  = "OMNI/SMART/INTERNETOFFICE",
         .decode_mode = DECODE_STANDARD,
         .quirks      = QUIRK_NEEDS_GET_REPORT,
-        .known_good  = true,
+        .known_good  = false,
+        .battery_voltage_nominal_mv = 24000,
+        .battery_runtime_low_s      = 120,
+        .battery_charge_low         = 10,
+        .battery_charge_warning     = 50,
+        .input_voltage_nominal_v    = 120,
+        .ups_type                   = "line-interactive",
     },
 
     /* ----------------------------------------------------------------
@@ -179,20 +265,34 @@ static const ups_device_entry_t s_db[] = {
         .model_hint  = "F6H/F6C Series",
         .decode_mode = DECODE_STANDARD,
         .quirks      = 0,
-        .known_good  = true,
+        .known_good  = false,
+        .battery_voltage_nominal_mv = 12000,
+        .battery_runtime_low_s      = 120,
+        .battery_charge_low         = 10,
+        .battery_charge_warning     = 50,
+        .input_voltage_nominal_v    = 120,
+        .ups_type                   = "standby",
     },
 
     /* ----------------------------------------------------------------
        Liebert / Vertiv (VID 0x10AF)
     ---------------------------------------------------------------- */
     {
+        /* Liebert GXT4/PSI5 — typically double-conversion online.
+         * NUT DDL: battery.voltage.nominal=24V-48V. Using 24V default. */
         .vid         = 0x10AF,
         .pid         = 0,
         .vendor_name = "Liebert",
         .model_hint  = "GXT4/PSI5",
         .decode_mode = DECODE_STANDARD,
         .quirks      = 0,
-        .known_good  = true,
+        .known_good  = false,
+        .battery_voltage_nominal_mv = 24000,
+        .battery_runtime_low_s      = 120,
+        .battery_charge_low         = 10,
+        .battery_charge_warning     = 50,
+        .input_voltage_nominal_v    = 120,
+        .ups_type                   = "online",
     },
 
     /* ----------------------------------------------------------------
@@ -205,20 +305,34 @@ static const ups_device_entry_t s_db[] = {
         .model_hint  = "Black Knight/Dragon/King Pro",
         .decode_mode = DECODE_STANDARD,
         .quirks      = 0,
-        .known_good  = true,
+        .known_good  = false,
+        .battery_voltage_nominal_mv = 12000,
+        .battery_runtime_low_s      = 120,
+        .battery_charge_low         = 10,
+        .battery_charge_warning     = 50,
+        .input_voltage_nominal_v    = 230,
+        .ups_type                   = "line-interactive",
     },
 
     /* ----------------------------------------------------------------
        HP (VID 0x03F0)
     ---------------------------------------------------------------- */
     {
+        /* HP T-series — typically line-interactive, 24V battery.
+         * NUT DDL values from T750/T1000 G3 confirmed entries. */
         .vid         = 0x03F0,
         .pid         = 0,
         .vendor_name = "HP",
         .model_hint  = "T750/T1000/T1500/T3000 G2/G3",
         .decode_mode = DECODE_STANDARD,
         .quirks      = 0,
-        .known_good  = true,
+        .known_good  = false,
+        .battery_voltage_nominal_mv = 24000,
+        .battery_runtime_low_s      = 120,
+        .battery_charge_low         = 10,
+        .battery_charge_warning     = 50,
+        .input_voltage_nominal_v    = 120,
+        .ups_type                   = "line-interactive",
     },
 
     /* ----------------------------------------------------------------
@@ -231,13 +345,18 @@ static const ups_device_entry_t s_db[] = {
         .model_hint  = "H750E/H950E/H1000E/H1750E",
         .decode_mode = DECODE_STANDARD,
         .quirks      = 0,
-        .known_good  = true,
+        .known_good  = false,
+        .battery_voltage_nominal_mv = 24000,
+        .battery_runtime_low_s      = 120,
+        .battery_charge_low         = 10,
+        .battery_charge_warning     = 50,
+        .input_voltage_nominal_v    = 120,
+        .ups_type                   = "line-interactive",
     },
 
     /* ----------------------------------------------------------------
        SENTINEL — must be last.
-       Matches any unknown device. Standard path, no quirks.
-       known_good = false triggers a warning log.
+       Generic fallback for unknown devices — conservative defaults.
     ---------------------------------------------------------------- */
     {
         .vid         = 0,
@@ -247,6 +366,12 @@ static const ups_device_entry_t s_db[] = {
         .decode_mode = DECODE_STANDARD,
         .quirks      = 0,
         .known_good  = false,
+        .battery_voltage_nominal_mv = 0,      /* unknown — do not serve */
+        .battery_runtime_low_s      = 120,
+        .battery_charge_low         = 10,
+        .battery_charge_warning     = 50,
+        .input_voltage_nominal_v    = 0,      /* unknown — do not serve */
+        .ups_type                   = NULL,
     },
 };
 
