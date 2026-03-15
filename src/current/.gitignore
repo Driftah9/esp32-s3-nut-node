@@ -2,6 +2,13 @@
 build/
 sdkconfig.old
 
+# Board-specific flash config — each builder must set this for their board.
+# See docs/INTEGRITY.md for the correct sdkconfig.defaults for THIS board
+# (Hosyond ESP32-S3-WROOM-1 N16R8 16MB).
+# Do NOT commit sdkconfig.defaults — it breaks builds on other boards.
+sdkconfig.defaults
+sdkconfig
+
 # ESP-IDF managed components (fetched at build time)
 managed_components/
 dependencies.lock

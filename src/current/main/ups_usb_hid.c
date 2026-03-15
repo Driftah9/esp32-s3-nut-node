@@ -171,16 +171,39 @@ static void reset_session(void)
 static void cleanup_device(void)
 {
     if (s_dev != NULL) {
-        /* Release interface before closing device.
-         * Guard: only release if we actually claimed it (intf_num >= 0). */
-        if (s_hid_intf_num >= 0) {
+        /* Interface release on DEV_GONE:
+         * When the device is physically removed (s_dev_gone=true), the USB
+         * host stack has already torn down all pipes and freed their DMA
+         * buffers internally.  Calling usb_host_interface_release() at this
+         * point double-frees those buffers, corrupting the heap (crash at
+         * hcd_dwc.c buffer_block_free with 0xa5a5a5a5 poison pattern).
+         *
+         * Safe sequence:
+         *   - Device physically gone (DEV_GONE): skip interface_release,
+         *     go straight to device_close.  The host stack cleans up pipes.
+         *   - Device still present (error path, not gone): release interface
+         *     first, then close device in the normal order.
+         *
+         * In both cases, clear s_hid_intf_num first to prevent intr_in_cb
+         * from resubmitting any pending transfers. */
+        /* Clear intf_num first - prevents intr_in_cb from resubmitting */
+        int intf_to_release = s_hid_intf_num;
+        s_hid_intf_num = -1;
+
+        if (s_dev_gone) {
+            /* Device physically removed: USB host already tore down pipes and
+             * freed DMA buffers. interface_release would double-free -> crash.
+             * Go straight to device_close. */
+            ESP_LOGI(TAG, "DEV_GONE: skipping interface_release (host already cleaned up pipes)");
+        } else if (intf_to_release >= 0) {
+            /* Normal close: device still attached, release interface first */
             esp_err_t rel = usb_host_interface_release(s_client, s_dev,
-                                                        (uint8_t)s_hid_intf_num);
+                                                        (uint8_t)intf_to_release);
             if (rel != ESP_OK) {
                 ESP_LOGW(TAG, "usb_host_interface_release: %s", esp_err_to_name(rel));
             }
-            s_hid_intf_num = -1;   /* clear immediately so intr_in_cb won't resubmit */
         }
+
         /* Small yield: let usb_lib_task process any pending hub events
          * that arrived between DEV_GONE flag set and this close call.
          * Without this, hub.c:837 assert fires if the hub event pump

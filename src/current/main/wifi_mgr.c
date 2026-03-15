@@ -1,4 +1,4 @@
-/*============================================================================
+﻿/*============================================================================
  MODULE: wifi_mgr
 
  RESPONSIBILITY
@@ -57,9 +57,9 @@ static void configure_ap_ip(void) {
     if (!s_ap_netif) return;
 
     esp_netif_ip_info_t ip = {0};
-    ip4addr_aton(WIFI_MGR_SOFTAP_IP_STR, &ip.ip);
-    ip4addr_aton(WIFI_MGR_SOFTAP_GW_STR, &ip.gw);
-    ip4addr_aton(WIFI_MGR_SOFTAP_NETMASK_STR, &ip.netmask);
+    ip4addr_aton(WIFI_MGR_SOFTAP_IP_STR,     (ip4_addr_t *)&ip.ip);
+    ip4addr_aton(WIFI_MGR_SOFTAP_GW_STR,      (ip4_addr_t *)&ip.gw);
+    ip4addr_aton(WIFI_MGR_SOFTAP_NETMASK_STR, (ip4_addr_t *)&ip.netmask);
 
     esp_netif_dhcps_stop(s_ap_netif);
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_netif_set_ip_info(s_ap_netif, &ip));

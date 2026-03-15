@@ -1,4 +1,4 @@
-/*============================================================================
+﻿/*============================================================================
  MODULE: ups_device_db
 
  PURPOSE
@@ -53,9 +53,10 @@
 
 /* ---- Decode modes ---------------------------------------------------- */
 typedef enum {
-    DECODE_STANDARD    = 0,  /* Generic HID descriptor path (default)        */
-    DECODE_CYBERPOWER  = 1,  /* CyberPower direct-decode bypass               */
-    DECODE_APC_BACKUPS = 2,  /* APC Back-UPS direct-decode bypass             */
+    DECODE_STANDARD     = 0,  /* Generic HID descriptor path (default)        */
+    DECODE_CYBERPOWER   = 1,  /* CyberPower direct-decode bypass               */
+    DECODE_APC_BACKUPS  = 2,  /* APC Back-UPS (PID 0002) direct-decode bypass  */
+    DECODE_APC_SMARTUPS = 3,  /* APC Smart-UPS (PID 0003) direct-decode bypass */
 } ups_decode_mode_t;
 
 /* ---- Database entry -------------------------------------------------- */

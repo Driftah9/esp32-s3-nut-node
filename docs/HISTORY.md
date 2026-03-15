@@ -1,7 +1,7 @@
 # ESP32-S3 NUT Node — Development History
 **Project:** esp32-s3-nut-node  
 **Hardware:** ESP32-S3 (16MB flash, 8MB PSRAM) + USB OTG  
-**Current Version:** v15.13 (2026-03-15)  
+**Current Version:** v15.14 (2026-03-15)  
 **GitHub:** https://github.com/Driftah9/esp32-s3-nut-node
 
 ---
@@ -253,6 +253,37 @@ app_main()
   `ups.delay.shutdown`, `ups.delay.start`, `ups.timer.reboot`, `ups.timer.shutdown`
 - All new variables confirmed live in Home Assistant after flash
 - Driver version bumped to 15.12
+
+### v15.14 — APC Smart-UPS (PID 0003) Support + USB Disconnect Crash Fixes
+
+**APC Smart-UPS C / Smart-UPS (PID 0x0003) support** (GitHub issue #1, reporter: omarkhali):
+- New decode mode `DECODE_APC_SMARTUPS` added to device DB
+- Interrupt-IN undocumented rid map confirmed from reporter discharge logs:
+  - `rid=0x0D` bytes[0:1] uint16-LE = battery.runtime seconds (confirmed: 0x1194=4500s)
+  - `rid=0x07` byte[0] status flags: bit2=AC present, bit1=discharging (confirmed from on-battery log: 0x0C on AC, 0x0A on battery)
+  - `rid=0x0C` battery.charge handled by existing standard descriptor path
+- GET_REPORT polling for Feature reports:
+  - `rid=0x06` charging/discharging flags (bytes[1:2])
+  - `rid=0x0E` battery.voltage (byte[1], raw whole volts, sanity 8-60V)
+- `rid=0x07` alone provides full OL/OB status without needing GET_REPORT
+
+**USB disconnect crash fixes (two separate root causes):**
+1. `ups_usb_hid.c` - On `DEV_GONE`, skip `usb_host_interface_release()`. The USB host
+   stack already tears down pipes internally on device removal; calling release again
+   double-frees DMA buffers and corrupts the heap (`0xa5a5a5a5` poison in `hcd_dwc.c`).
+2. `ups_get_report.c` - Control transfer callback no longer attempts to free the
+   transfer buffer itself. On `DEV_GONE` the host cancels in-flight transfers and
+   calls the callback with a non-OK status. Caller frees only if callback has fired
+   (`s_ctrl_done=true`); otherwise leaks the transfer rather than double-freeing.
+
+**IDF v5.5+ compatibility:**
+- `wifi_mgr.c` `ip4addr_aton()` calls now use explicit `(ip4_addr_t *)` cast
+- Tested on v5.3.1 (Stryder) and v5.5.3 (issue #1 reporter)
+
+**Build system:**
+- `sdkconfig.defaults` excluded from git (board-specific, bricks wrong-flash-size boards)
+- `sdkconfig.defaults.example` added with common board configs
+- README updated with Before Building instructions
 
 ### v15.13 — NUT Variables Lightbox + /status JSON Expansion
 

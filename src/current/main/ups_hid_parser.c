@@ -25,6 +25,11 @@
         rid=0C comment updated with confirmed field map from two devices.
  v15.7  Remove input_voltage and output_voltage from cache, standard
         decode path, and CyberPower direct-decode.
+ v15.14 Add DECODE_APC_SMARTUPS for APC Smart-UPS C / Smart-UPS (PID 0003).
+        decode_apc_smartups_direct(): rid=0x0D runtime (uint16-LE seconds),
+        rid=0x07 status flags (confirmed: bit2=AC present, bit1=discharging),
+        rid=0x0C charge via standard descriptor path.
+        Confirmed from issue #1 Smart-UPS C 1500 on-battery discharge log.
         Neither appears via interrupt IN on any tested device —
         APC voltages are Feature-only (GET_REPORT, M-series future task),
         CyberPower rids 0x23 were direct-decoded but data is not needed
@@ -166,6 +171,8 @@ void ups_hid_parser_set_descriptor(const hid_desc_t *desc)
         ESP_LOGI(TAG, "Decode mode: DIRECT (CyberPower bypass active)");
     } else if (s_device && s_device->decode_mode == DECODE_APC_BACKUPS) {
         ESP_LOGI(TAG, "Decode mode: APC Back-UPS (direct + standard combined)");
+    } else if (s_device && s_device->decode_mode == DECODE_APC_SMARTUPS) {
+        ESP_LOGI(TAG, "Decode mode: APC Smart-UPS (direct INT-IN + GET_REPORT)");
     } else {
         ESP_LOGI(TAG, "Decode mode: STANDARD (generic HID descriptor path)");
     }
@@ -473,6 +480,82 @@ static bool decode_apc_backups_direct(uint8_t rid,
     return changed;
 }
 
+/* ---- APC Smart-UPS direct-decode ------------------------------------ */
+/*
+ * APC Smart-UPS C / Smart-UPS (PID 0x0003) live interrupt-IN rid map.
+ * Confirmed from issue #1 (Smart-UPS C 1500, v15.13 log).
+ *
+ * All rids below are NOT declared in the HID descriptor - they arrive
+ * as undocumented interrupt-IN reports alongside the descriptor-declared
+ * rid=0x0C charge report.
+ *
+ * rid=0x0D  byte[0:1] = uint16 LE = battery.runtime seconds
+ *           Confirmed: 0x1194=4500s, 0x120C=4620s at 100pct charge.
+ *           Value oscillates as UPS recalculates remaining runtime.
+ *
+ * rid=0x07  byte[0] = status flags (confirmed from issue #1 discharge log)
+ *           0x0C (on AC):      bit2=1 AC present, bit1=0
+ *           0x0A (on battery): bit2=0 AC absent,  bit1=1 discharging
+ *           bit3 (0x08) always set - ignore. bit2=AC present, bit1=discharging.
+ *
+ * rid=0x0C  charge - handled by standard descriptor path (type=0 Input).
+ */
+static bool decode_apc_smartups_direct(uint8_t rid,
+                                        const uint8_t *p, size_t plen,
+                                        ups_state_update_t *upd)
+{
+    bool changed = false;
+    switch (rid) {
+    case 0x0D:
+        if (plen >= 2) {
+            uint16_t runtime_s = (uint16_t)(p[0] | ((uint16_t)p[1] << 8));
+            if (runtime_s > 0 && runtime_s < 65000u) {
+                upd->battery_runtime_valid = true;
+                upd->battery_runtime_s     = runtime_s;
+                changed = true;
+                ESP_LOGI(TAG, "[SMRT] battery.runtime=%us (rid=0x0D)", runtime_s);
+            }
+        }
+        break;
+    case 0x07:
+        /*
+         * Status flags byte - confirmed from issue #1 on-battery log.
+         *
+         * Observed values:
+         *   0x0C (0000 1100) = on AC power       (bit3 + bit2)
+         *   0x0A (0000 1010) = on battery/discharging (bit3 + bit1)
+         *
+         * Bit map:
+         *   bit3 (0x08) = always set, purpose unknown - ignore
+         *   bit2 (0x04) = AC present (1=AC, 0=on battery)
+         *   bit1 (0x02) = discharging (1=discharging, 0=not discharging)
+         *   bit0 (0x01) = always clear in observed data - ignore
+         *
+         * rid=0x07 alone provides full OL/OB status - GET_REPORT rid=0x06
+         * charging/discharging flags are redundant for status but kept
+         * for completeness (still used for CHRG flag detection).
+         */
+        if (plen >= 1) {
+            bool ac_present  = (p[0] & 0x04u) != 0u;
+            bool discharging = (p[0] & 0x02u) != 0u;
+            upd->input_utility_present_valid = true;
+            upd->input_utility_present       = ac_present;
+            if (discharging) upd->ups_flags |= 0x02u;
+            upd->ups_flags_valid = true;
+            changed = true;
+            ESP_LOGI(TAG, "[SMRT] rid=0x07 flags=0x%02X ac=%u discharging=%u",
+                     p[0], (unsigned)ac_present, (unsigned)discharging);
+        }
+        break;
+    case 0x0C:
+        /* Charge handled by standard descriptor path - no action here */
+        break;
+    default:
+        break;
+    }
+    return changed;
+}
+
 /* ---- derive_status --------------------------------------------------- */
 /*
  * Builds NUT compound status string into upd->ups_status.
@@ -591,6 +674,13 @@ bool ups_hid_parser_decode_report(const uint8_t *data, size_t len,
             changed = true;
         }
         /* Always fall through to standard path for descriptor fields. */
+    } else if (mode == DECODE_APC_SMARTUPS) {
+        /* APC Smart-UPS: direct for undocumented interrupt-IN rids,
+           then fall through to standard path for descriptor charge field. */
+        if (decode_apc_smartups_direct(rid, payload, payload_len, upd)) {
+            changed = true;
+        }
+        /* Fall through - standard path picks up rid=0x0C charge (Input). */
     }
 
     /* ---- Standard descriptor path ---- */

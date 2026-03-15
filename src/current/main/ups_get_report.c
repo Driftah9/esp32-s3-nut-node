@@ -1,4 +1,4 @@
-/*============================================================================
+﻿/*============================================================================
  MODULE: ups_get_report
 
  RESPONSIBILITY
@@ -70,14 +70,23 @@ static const ups_device_entry_t *s_entry         = NULL;
 static TaskHandle_t              s_timer_task    = NULL;
 static volatile bool             s_active        = false;
 
+/* ---- Forward declarations -------------------------------------------- */
+static void decode_apc_smartups_feature(uint8_t rid, const uint8_t *data, size_t len);
+
 /* ---- Control transfer completion callback ---------------------------- */
-static volatile bool      s_ctrl_done   = false;
-static volatile esp_err_t s_ctrl_status = ESP_FAIL;
-static volatile uint32_t  s_ctrl_bytes  = 0;
+static volatile bool      s_ctrl_done     = false;
+static volatile esp_err_t s_ctrl_status   = ESP_FAIL;
+static volatile uint32_t  s_ctrl_bytes    = 0;
 
 static void ctrl_cb(usb_transfer_t *t)
 {
     if (!t) return;
+    /* Always signal completion - caller decides whether to free.
+     * On DEV_GONE the USB host stack cancels transfers and calls this
+     * callback with a non-OK status. We just signal done; the caller
+     * checks s_ctrl_done and frees the transfer if still valid.
+     * The host stack does NOT free the transfer buffer on cancel -
+     * that is always the caller's responsibility. */
     s_ctrl_bytes  = (uint32_t)t->actual_num_bytes;
     s_ctrl_status = (t->status == USB_TRANSFER_STATUS_COMPLETED) ? ESP_OK : ESP_FAIL;
     s_ctrl_done   = true;
@@ -146,7 +155,17 @@ static esp_err_t do_get_feature_report(uint8_t rid, uint8_t *buf, size_t buf_sz,
     if (!s_ctrl_done || s_ctrl_status != ESP_OK) {
         ESP_LOGW(TAG, "GET_REPORT rid=0x%02X: transfer failed/timed out (done=%d)",
                  rid, (int)s_ctrl_done);
-        usb_host_transfer_free(t);
+        /* If the loop timed out without the callback firing, we have a problem:
+         * the transfer is still in-flight and we cannot safely free it.
+         * In practice on DEV_GONE, the USB host stack cancels all transfers
+         * and fires the callback with a non-OK status before we get here,
+         * so s_ctrl_done will be true. If somehow it isn't (pure timeout),
+         * we leak the transfer rather than corrupt the heap. */
+        if (s_ctrl_done) {
+            usb_host_transfer_free(t);
+        } else {
+            ESP_LOGW(TAG, "GET_REPORT rid=0x%02X: callback never fired — leaking transfer to avoid heap corruption", rid);
+        }
         return ESP_FAIL;
     }
 
@@ -260,12 +279,76 @@ static void decode_apc_feature(uint8_t rid, const uint8_t *data, size_t len)
 /* Production: rid=0x17 only (confirmed = AC line voltage, 120V US / 230V EU)
  * Battery voltage is not available via GET_REPORT on APC Back-UPS (0002)
  * firmware — all high rids (0x82-0x88) STALL on this device. */
-static const uint8_t s_apc_rids[]       = { 0x17 };
-static const size_t  s_apc_rids_n       = sizeof(s_apc_rids) / sizeof(s_apc_rids[0]);
-static const uint8_t s_tripplite_rids[] = { 0x01, 0x0C };
-static const size_t  s_tripplite_rids_n = sizeof(s_tripplite_rids) / sizeof(s_tripplite_rids[0]);
+static const uint8_t s_apc_rids[]          = { 0x17 };
+static const size_t  s_apc_rids_n          = sizeof(s_apc_rids) / sizeof(s_apc_rids[0]);
+/* APC Smart-UPS (PID 0003) Feature rids:
+ *   rid=0x06  charging flag (byte[1]) + discharging flag (byte[2])
+ *   rid=0x0E  battery.voltage (byte[1], raw value)
+ * Runtime arrives on interrupt-IN (rid=0x0D) so no GET_REPORT needed. */
+static const uint8_t s_apc_smartups_rids[] = { 0x06, 0x0E };
+static const size_t  s_apc_smartups_rids_n = sizeof(s_apc_smartups_rids) / sizeof(s_apc_smartups_rids[0]);
+static const uint8_t s_tripplite_rids[]    = { 0x01, 0x0C };
+static const size_t  s_tripplite_rids_n    = sizeof(s_tripplite_rids) / sizeof(s_tripplite_rids[0]);
 
-/* ---- Timer task — only posts to queue, does NO USB work -------------- */
+/* ---- Decode APC Smart-UPS Feature reports ----------------------------- */
+static void decode_apc_smartups_feature(uint8_t rid, const uint8_t *data, size_t len)
+{
+    char hexbuf[48] = {0};
+    int  pos = 0;
+    size_t n = (len > 8u) ? 8u : len;
+    for (size_t i = 0; i < n; i++) {
+        pos += snprintf(hexbuf + pos, sizeof(hexbuf) - (size_t)pos,
+                        "%02X%s", data[i], (i == n-1u) ? "" : " ");
+    }
+    ESP_LOGI(TAG, "[SMRT Feature] rid=0x%02X len=%u: %s", rid, (unsigned)len, hexbuf);
+
+    switch (rid) {
+    case 0x06: {
+        if (len < 3u) {
+            ESP_LOGW(TAG, "[SMRT Feature] rid=0x06: short read %u bytes", (unsigned)len);
+            break;
+        }
+        bool charging    = (data[1] != 0u);
+        bool discharging = (data[2] != 0u);
+        ESP_LOGI(TAG, "[SMRT Feature] rid=0x06 charging=%u discharging=%u",
+                 (unsigned)charging, (unsigned)discharging);
+        ups_state_update_t upd;
+        memset(&upd, 0, sizeof(upd));
+        upd.valid           = true;
+        upd.ups_flags_valid = true;
+        if (charging)    upd.ups_flags |= 0x01u;
+        if (discharging) upd.ups_flags |= 0x02u;
+        upd.input_utility_present_valid = true;
+        upd.input_utility_present       = !discharging;
+        ups_state_apply_update(&upd);
+        break;
+    }
+    case 0x0E: {
+        if (len < 2u) {
+            ESP_LOGW(TAG, "[SMRT Feature] rid=0x0E: short read %u bytes", (unsigned)len);
+            break;
+        }
+        uint8_t raw = data[1];
+        /* raw = whole volts (tentative). Sanity: 8..60V for 12/24/48V systems. */
+        if (raw >= 8u && raw <= 60u) {
+            ups_state_update_t upd;
+            memset(&upd, 0, sizeof(upd));
+            upd.valid                 = true;
+            upd.battery_voltage_valid = true;
+            upd.battery_voltage_mv    = (uint32_t)raw * 1000u;
+            ups_state_apply_update(&upd);
+            ESP_LOGI(TAG, "[SMRT Feature] battery.voltage=%uV", (unsigned)raw);
+        } else {
+            ESP_LOGW(TAG, "[SMRT Feature] rid=0x0E raw=%u outside 8-60V - ignoring", (unsigned)raw);
+        }
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+/* ---- Timer task - only posts to queue, does NO USB work -------------- */
 static void get_report_timer_task(void *arg)
 {
     (void)arg;
@@ -276,6 +359,9 @@ static void get_report_timer_task(void *arg)
     if (s_entry && s_entry->decode_mode == DECODE_APC_BACKUPS) {
         rids   = s_apc_rids;
         rids_n = s_apc_rids_n;
+    } else if (s_entry && s_entry->decode_mode == DECODE_APC_SMARTUPS) {
+        rids   = s_apc_smartups_rids;
+        rids_n = s_apc_smartups_rids_n;
     } else {
         rids   = s_tripplite_rids;
         rids_n = s_tripplite_rids_n;
@@ -332,6 +418,8 @@ void ups_get_report_service_queue(void)
     if (err == ESP_OK && got > 0) {
         if (s_entry && s_entry->decode_mode == DECODE_APC_BACKUPS) {
             decode_apc_feature(req.rid, buf, got);
+        } else if (s_entry && s_entry->decode_mode == DECODE_APC_SMARTUPS) {
+            decode_apc_smartups_feature(req.rid, buf, got);
         }
         /* Future: add Tripp Lite decode branch here */
     }

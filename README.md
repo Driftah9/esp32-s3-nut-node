@@ -62,15 +62,30 @@ You'll need: UPS brand/model, USB VID:PID (shown in the portal), and the first 2
 ## Quick Start
 
 ### Requirements
-- ESP-IDF v5.3.1
+- ESP-IDF v5.3.1 or later (tested: v5.3.1, v5.5.3)
 - ESP32-S3 board with USB OTG support
 - UPS with USB HID interface
 
+### Before Building - Set Your Board's Flash Config
+
+`sdkconfig.defaults` is not included in the repo because it is board-specific.
+Building without it will default to 2MB flash, which bricks boards with more flash.
+
+```bash
+# Copy the example and edit for your board
+cp src/current/sdkconfig.defaults.example src/current/sdkconfig.defaults
+```
+
+Then open `sdkconfig.defaults` and set the correct flash size for your board.
+Common configs are included in the example file. If unsure, check your board's
+datasheet or run `idf.py menuconfig` -> Serial flasher config.
+
 ### Build and Flash
-```powershell
-# From src/current/ in the ESP-IDF PowerShell shell
+```bash
+# From src/current/ in the ESP-IDF shell
 idf.py build
-idf.py flash -p COM3
+idf.py flash -p /dev/ttyUSBx   # Linux/Mac
+idf.py flash -p COM3            # Windows
 ```
 
 ### First Boot

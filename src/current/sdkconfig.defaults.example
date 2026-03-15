@@ -1,0 +1,41 @@
+# sdkconfig.defaults.example
+#
+# Copy this file to sdkconfig.defaults and edit for YOUR board.
+# sdkconfig.defaults is gitignored - never commit it.
+#
+# This file tells ESP-IDF the flash size, speed, and mode for your board.
+# Getting this wrong will cause a boot failure after flash.
+#
+# ── Common board configs ─────────────────────────────────────────────────────
+#
+# Hosyond ESP32-S3-WROOM-1 N16R8 (16MB flash, 8MB PSRAM) — project default:
+#   CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+#   CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+#   CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+#   CONFIG_ESPTOOLPY_FLASHFREQ="80m"
+#   CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+#   CONFIG_ESPTOOLPY_FLASHMODE="dio"
+#
+# Generic ESP32-S3 devkit (4MB flash):
+#   CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+#   CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+#   CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+#   CONFIG_ESPTOOLPY_FLASHFREQ="80m"
+#   CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+#   CONFIG_ESPTOOLPY_FLASHMODE="dio"
+#
+# If unsure: run "idf.py menuconfig" -> Serial flasher config -> Flash size
+# and match whatever your board reports during "idf.py flash".
+#
+# ── Paste your config below this line ────────────────────────────────────────
+
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESPTOOLPY_FLASHFREQ="80m"
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHMODE="dio"
+
+# Log level - DEBUG shows HID parser output on monitor (recommended for testing)
+CONFIG_LOG_DEFAULT_LEVEL_DEBUG=y
+CONFIG_LOG_DEFAULT_LEVEL=4
