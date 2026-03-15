@@ -73,23 +73,37 @@ static volatile bool             s_active        = false;
 /* ---- Forward declarations -------------------------------------------- */
 static void decode_apc_smartups_feature(uint8_t rid, const uint8_t *data, size_t len);
 
-/* ---- Control transfer completion callback ---------------------------- */
-static volatile bool      s_ctrl_done     = false;
-static volatile esp_err_t s_ctrl_status   = ESP_FAIL;
-static volatile uint32_t  s_ctrl_bytes    = 0;
+/* ---- Control transfer state ------------------------------------------ */
+/*
+ * ctrl_cb owns the transfer lifetime from submit until free.
+ * The callback copies payload into s_ctrl_payload, frees the transfer,
+ * then signals s_ctrl_done. Caller reads s_ctrl_payload after done.
+ *
+ * s_inflight tracks whether a transfer is registered with the USB host.
+ * If non-NULL when stop() is called, the next DEV_GONE will cancel it
+ * and ctrl_cb will free it safely. stop() must not free it directly.
+ */
+#define CTRL_PAYLOAD_MAX 24u
+static volatile usb_transfer_t *s_inflight      = NULL;
+static volatile bool            s_ctrl_done     = false;
+static volatile esp_err_t       s_ctrl_status   = ESP_FAIL;
+static volatile uint8_t         s_ctrl_payload[CTRL_PAYLOAD_MAX];
+static volatile size_t          s_ctrl_pay_len  = 0;
 
 static void ctrl_cb(usb_transfer_t *t)
 {
     if (!t) return;
-    /* Always signal completion - caller decides whether to free.
-     * On DEV_GONE the USB host stack cancels transfers and calls this
-     * callback with a non-OK status. We just signal done; the caller
-     * checks s_ctrl_done and frees the transfer if still valid.
-     * The host stack does NOT free the transfer buffer on cancel -
-     * that is always the caller's responsibility. */
-    s_ctrl_bytes  = (uint32_t)t->actual_num_bytes;
-    s_ctrl_status = (t->status == USB_TRANSFER_STATUS_COMPLETED) ? ESP_OK : ESP_FAIL;
-    s_ctrl_done   = true;
+    s_ctrl_status  = (t->status == USB_TRANSFER_STATUS_COMPLETED) ? ESP_OK : ESP_FAIL;
+    s_ctrl_pay_len = 0;
+    if (s_ctrl_status == ESP_OK && t->actual_num_bytes > 8u) {
+        size_t plen = (size_t)(t->actual_num_bytes - 8u);
+        if (plen > CTRL_PAYLOAD_MAX) plen = CTRL_PAYLOAD_MAX;
+        memcpy((void *)s_ctrl_payload, t->data_buffer + 8u, plen);
+        s_ctrl_pay_len = plen;
+    }
+    usb_host_transfer_free(t);
+    s_inflight  = NULL;
+    s_ctrl_done = true;   /* signal last */
 }
 
 /* ---- Issue one GET_REPORT — called from usb_client_task only --------- */
@@ -133,48 +147,53 @@ static esp_err_t do_get_feature_report(uint8_t rid, uint8_t *buf, size_t buf_sz,
     t->context          = NULL;
     t->num_bytes        = alloc;
 
-    s_ctrl_done   = false;
-    s_ctrl_status = ESP_FAIL;
-    s_ctrl_bytes  = 0;
+    s_ctrl_done    = false;
+    s_ctrl_status  = ESP_FAIL;
+    s_ctrl_pay_len = 0;
+    s_inflight     = t;   /* track for stop() to detect pending transfer */
 
     err = usb_host_transfer_submit_control(s_client, t);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "submit_control rid=0x%02X: %s", rid, esp_err_to_name(err));
+        s_inflight = NULL;
         usb_host_transfer_free(t);
         return err;
     }
 
-    /* Pump USB event loop until callback fires — max 1500ms */
+    /* Pump USB event loop until callback fires.
+     * ctrl_cb always frees the transfer — caller must NOT free t after this point.
+     * On DEV_GONE the host cancels all transfers and fires ctrl_cb with error status.
+     * Max wait: 3000ms (600 x 5ms) - increased from 1500ms to handle slow APC responses. */
     const TickType_t slice = pdMS_TO_TICKS(5);
-    const int        max   = 300;
+    const int        max   = 600;
     for (int i = 0; i < max && !s_ctrl_done; i++) {
         usb_host_client_handle_events(s_client, 0);
         vTaskDelay(slice);
     }
 
-    if (!s_ctrl_done || s_ctrl_status != ESP_OK) {
-        ESP_LOGW(TAG, "GET_REPORT rid=0x%02X: transfer failed/timed out (done=%d)",
-                 rid, (int)s_ctrl_done);
-        /* If the loop timed out without the callback firing, we have a problem:
-         * the transfer is still in-flight and we cannot safely free it.
-         * In practice on DEV_GONE, the USB host stack cancels all transfers
-         * and fires the callback with a non-OK status before we get here,
-         * so s_ctrl_done will be true. If somehow it isn't (pure timeout),
-         * we leak the transfer rather than corrupt the heap. */
-        if (s_ctrl_done) {
-            usb_host_transfer_free(t);
-        } else {
-            ESP_LOGW(TAG, "GET_REPORT rid=0x%02X: callback never fired — leaking transfer to avoid heap corruption", rid);
-        }
+    if (!s_ctrl_done) {
+        /* Genuine timeout: callback never fired. Transfer is still registered
+         * with the USB host. s_inflight remains set; on next DEV_GONE the
+         * host will cancel the transfer and ctrl_cb will free it safely. */
+        ESP_LOGW(TAG, "GET_REPORT rid=0x%02X: timed out - transfer pending until DEV_GONE", rid);
         return ESP_FAIL;
     }
 
-    size_t payload = (s_ctrl_bytes > 8u) ? (size_t)(s_ctrl_bytes - 8u) : 0u;
-    if (payload > buf_sz) payload = buf_sz;
-    memcpy(buf, t->data_buffer + 8u, payload);
-    if (out_len) *out_len = payload;
+    /* ctrl_cb has fired and freed the transfer. t is no longer valid.
+     * Payload was copied into s_ctrl_payload before the free. */
+    if (s_ctrl_status != ESP_OK) {
+        ESP_LOGW(TAG, "GET_REPORT rid=0x%02X: transfer failed", rid);
+        return ESP_FAIL;
+    }
 
-    usb_host_transfer_free(t);
+    size_t plen = s_ctrl_pay_len;
+    if (plen > buf_sz) plen = buf_sz;
+    if (plen == 0) {
+        ESP_LOGW(TAG, "GET_REPORT rid=0x%02X: empty payload", rid);
+        return ESP_FAIL;
+    }
+    memcpy(buf, (const void *)s_ctrl_payload, plen);
+    if (out_len) *out_len = plen;
     return ESP_OK;
 }
 
@@ -479,7 +498,16 @@ void ups_get_report_stop(void)
     s_client   = NULL;
     s_intf_num = -1;
     s_entry    = NULL;
-    /* Timer task will see s_active=false and self-delete */
+    /* Timer task will see s_active=false and self-delete.
+     * If a control transfer is in-flight (s_inflight != NULL), ctrl_cb will
+     * free it when the USB host cancels it during its own DEV_GONE teardown.
+     * Do NOT wait here - this function is called from cleanup_device() which
+     * runs in usb_client_task. Waiting for ctrl_cb here would deadlock because
+     * ctrl_cb fires via usb_host_client_handle_events() which only runs in
+     * the same usb_client_task that is blocked waiting here. */
+    if (s_inflight != NULL) {
+        ESP_LOGI(TAG, "Stop: transfer in-flight, will be freed by ctrl_cb on USB teardown");
+    }
 }
 
 bool ups_get_report_running(void)

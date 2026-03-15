@@ -186,32 +186,16 @@ static void cleanup_device(void)
          *
          * In both cases, clear s_hid_intf_num first to prevent intr_in_cb
          * from resubmitting any pending transfers. */
-        /* Clear intf_num first - prevents intr_in_cb from resubmitting */
-        int intf_to_release = s_hid_intf_num;
+        /* s_hid_intf_num already cleared in client_event_cb on DEV_GONE.
+         * Clear here too for the non-DEV_GONE path (future safety). */
         s_hid_intf_num = -1;
 
-        if (s_dev_gone) {
-            /* Device physically removed: USB host already tore down pipes and
-             * freed DMA buffers. interface_release would double-free -> crash.
-             * Go straight to device_close. */
-            ESP_LOGI(TAG, "DEV_GONE: skipping interface_release (host already cleaned up pipes)");
-        } else if (intf_to_release >= 0) {
-            /* Normal close: device still attached, release interface first */
-            esp_err_t rel = usb_host_interface_release(s_client, s_dev,
-                                                        (uint8_t)intf_to_release);
-            if (rel != ESP_OK) {
-                ESP_LOGW(TAG, "usb_host_interface_release: %s", esp_err_to_name(rel));
-            }
-        }
-
-        /* Small yield: let usb_lib_task process any pending hub events
-         * that arrived between DEV_GONE flag set and this close call.
-         * Without this, hub.c:837 assert fires if the hub event pump
-         * races ahead of our cleanup. */
+        /* interface_release was already called in client_event_cb on DEV_GONE.
+         * Just close the device handle to release the client reference. */
         vTaskDelay(pdMS_TO_TICKS(20));
         esp_err_t cerr = usb_host_device_close(s_client, s_dev);
         if (cerr != ESP_OK) {
-            ESP_LOGW(TAG, "usb_host_device_close: %s", esp_err_to_name(cerr));
+            ESP_LOGI(TAG, "usb_host_device_close: %s", esp_err_to_name(cerr));
         }
         s_dev = NULL;
     }
@@ -243,11 +227,23 @@ static void client_event_cb(const usb_host_client_event_msg_t *event_msg, void *
         s_cleanup_pending = false;
         ESP_EARLY_LOGI(TAG, "NEW_DEV addr=%u", (unsigned)s_new_dev_addr);
     } else if (event_msg->event == USB_HOST_CLIENT_EVENT_DEV_GONE) {
-        /* Set cleanup_pending FIRST — intr_in_cb checks this to avoid
-         * resubmitting transfers after disconnect. s_dev_gone triggers
-         * the main loop to call cleanup_device(). */
+        /* Set cleanup_pending FIRST so intr_in_cb stops resubmitting. */
         s_cleanup_pending = true;
-        s_dev_gone        = true;
+        /* Release the interface NOW, inside the callback, before the hub
+         * driver finishes its own teardown and poisons the DMA buffers.
+         * Calling interface_release after DEV_GONE (in cleanup_device)
+         * causes a double-free crash in hcd_dwc.c on IDF v5.3.1.
+         * Calling it here - at DEV_GONE notification time - is safe because
+         * the host stack has not yet freed the pipe buffers. */
+        if (s_dev != NULL && s_hid_intf_num >= 0) {
+            esp_err_t rel = usb_host_interface_release(s_client, s_dev,
+                                                        (uint8_t)s_hid_intf_num);
+            if (rel != ESP_OK) {
+                ESP_EARLY_LOGW(TAG, "DEV_GONE interface_release: %s", esp_err_to_name(rel));
+            }
+            s_hid_intf_num = -1;
+        }
+        s_dev_gone = true;
         ESP_EARLY_LOGW(TAG, "DEV_GONE");
     }
 }
