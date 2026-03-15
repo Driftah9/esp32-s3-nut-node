@@ -3,7 +3,7 @@
 
 ## Project TODO — esp32-s3-nut-node
 
-Last updated: 2026-03-13 (v15.9)
+Last updated: 2026-03-15 (v15.13)
 
 ### Phase 1 — Stability with Current UPS (CyberPower PID=0x0501) [IN PROGRESS]
 
@@ -13,18 +13,21 @@ Last updated: 2026-03-13 (v15.9)
 | S2 | Fix `ups.status` always showing UNKNOWN | ✅ Done | derive_status() was correct; was timing on first render. v15.3 full AJAX |
 | S3 | Version strings consistent across main/portal/nut_server | ✅ Done | v15.3 bump |
 | S4 | Portal AJAX updates all live cells (runtime, voltages, load) | ✅ Done | v15.3 — /status JSON expanded, AJAX updated |
-| S5 | HA integration — delete 3 dead NUT/ESPHome integrations | ⏳ Pending | See HA UI cleanup in PENDING list |
-| S6 | HA integration — add NUT 10.0.0.190:3493 | ⏳ Pending | After S5 |
-| S7 | Set AP password (remove open AP warning) | ⏳ Pending | Easy — portal config |
+| S5 | HA integration — delete 3 dead NUT/ESPHome integrations | ✅ Done | Completed |
+| S6 | HA integration — add NUT 10.0.0.190:3493 | ✅ Done | HA NUT confirmed working |
+| S7 | Set AP password (remove open AP warning) | ✅ Done | Configured |
 | S8 | Fix `driver.version` display (was 14.24/14.25, now 15.3) | ✅ Done | v15.3 |
-| S9 | Decode rid=0x21 (input/output freq? alarm flags?) | ⏳ Pending | 0x21 `6A C6` — bytes unclear |
-| S10 | Decode rid=0x22 (1-byte status byte = 0x09) | ⏳ Pending | Bit meanings unknown |
-| S11 | Decode rid=0x25 (load% ? — always 0x00) | ⏳ Pending | May be ups.load = 0% |
-| S12 | Battery scale factor (CPS 1.5× voltage bug check) | ⏳ Pending | Compare batt_v to batt_v_nominal at runtime |
-| S13 | Frequency scale factor (CPS freq × 0.1 if > 100) | ⏳ Pending | When freq field is decoded |
-| S14 | Test on-battery behavior — unplug UPS, verify OB DISCHRG | ⏳ Pending | Requires manual test |
-| S15 | GitHub release tag v15.3 | ⏳ Pending | After S6 (HA integration verified) |
-| S16 | APC GET_REPORT polling — Feature reports for voltages (batt, input, output) | ✅ Done | v15.8 — ups_get_report.c polling task; flows to state, portal, NUT |
+| S9 | Decode rid=0x21 CyberPower runtime | ✅ Done | v15.11 — 16-bit LE seconds, confirmed |
+| S10 | rid=0x82 silence — was wrong runtime source | ✅ Done | v15.11 — static 300s threshold, silenced |
+| S11 | Decode rid=0x25 (ups.load) | ⏳ Pending Phase 2 | Correct rid not yet identified |
+| S12 | Battery scale factor (CPS 1.5× voltage bug check) | ✅ Done | v15.3 — QUIRK_BATT_VOLT_SCALE implemented |
+| S13 | Frequency scale factor (CPS freq × 0.1 if > 100) | ✅ Done | v15.3 — QUIRK_FREQ_SCALE_0_1 implemented |
+| S14 | Test on-battery behavior — unplug UPS, verify OB DISCHRG | ✅ Done | Confirmed multiple sessions |
+| S15 | GitHub release tag v15.12 / v15.13 | ✅ Done | Tagged and pushed |
+| S16 | APC GET_REPORT polling — Feature reports for voltages | ✅ Done | v15.8 — ups_get_report.c |
+| S17 | USB hotplug fix — hub.c:837 assert | ✅ Done | v15.12 — s_cleanup_pending flag |
+| S18 | NUT variable parity Phase 1 | ✅ Done | v15.12 — all static vars confirmed in HA |
+| S19 | NUT Variables lightbox in portal | ✅ Done | v15.13 — confirmed working |
 
 ### Phase 2 — Zigbee Coprocessor (ESP32-H2 Mini)
 

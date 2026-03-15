@@ -113,6 +113,45 @@ which is exactly how the reference NUT driver works.
 
 ---
 
+## D012 — USB hotplug fix via s_cleanup_pending flag (v15.12)
+**Decision:** Add `volatile bool s_cleanup_pending` flag set in `client_event_cb` BEFORE
+`s_dev_gone`, checked in `intr_in_cb` before resubmitting transfers.
+**Reason:** ESP-IDF hub.c:837 assert fires when a USB transfer is resubmitted after
+device disconnect. The root cause is a race between the interrupt callback and the
+cleanup sequence. Setting `s_cleanup_pending` first blocks the resubmit path safely.
+**Confirmed stable:** v15.12 — 2 clean hotplug cycles confirmed.
+
+---
+
+## D013 — NUT static variables stored in device DB, not ups_state (v15.12)
+**Decision:** NUT static variables (battery.voltage.nominal, battery.runtime.low, etc.)
+are stored in `ups_device_db` per device entry, not in `ups_state`.
+**Reason:** These values are device-specific constants, not runtime measurements.
+Storing them in the DB keeps `ups_state` as a pure live-data struct and allows
+`nut_server.c` and `http_portal.c` to look them up independently via `ups_device_db_lookup()`.
+**Confirmed stable:** v15.12
+
+---
+
+## D014 — HTTP_PAGE_BUF 16384 bytes (v15.13)
+**Decision:** Increased `HTTP_PAGE_BUF` from 8192 to 16384 bytes.
+**Reason:** The NUT Variables lightbox added significant inline CSS and JS to the
+dashboard HTML. The `snprintf` was silently truncating at 8192 bytes, cutting off
+the `openNut()` JavaScript function entirely. 16KB fits the full page with headroom.
+**Confirmed stable:** v15.13
+
+---
+
+## D015 — Build/flash are manual steps — CLI must not run idf.py (v15.13)
+**Decision:** Claude CLI must never attempt to run `idf.py build` or `idf.py flash`.
+Stryder runs these manually in the ESP-IDF PowerShell shell.
+**Reason:** Running `idf.py` from the CLI Bash tool triggers a permission prompt that
+blocks the session. The MinGW/MSYS bash environment is also incompatible with the
+Windows ESP-IDF toolchain.
+**Enforced in:** Both CLAUDE.md files (global + project-level)
+
+---
+
 ## Template for new decisions
 ## DXXX — Short title
 **Decision:** What was decided.

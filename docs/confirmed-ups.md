@@ -11,9 +11,9 @@ Each entry was submitted via a [UPS Compatibility Report](https://github.com/Dri
 
 | Device | VID:PID | Firmware | Status | Submitted by | Issue | Date |
 |--------|---------|----------|--------|--------------|-------|------|
-| APC Back-UPS XS 1500M | 051D:0002 | v15.12 | ✅ Confirmed | @Driftah9 | — | 2026-03-09 |
-| APC Back-UPS BR1000G | 051D:0002 | v15.12 | ✅ Confirmed | @Driftah9 | — | 2026-03-09 |
-| CyberPower CP550HG / SX550G | 0764:0501 | v15.12 | ✅ Confirmed | @Driftah9 | — | 2026-03-09 |
+| APC Back-UPS XS 1500M | 051D:0002 | v15.13 | ✅ Confirmed | @Driftah9 | — | 2026-03-09 |
+| APC Back-UPS BR1000G | 051D:0002 | v15.13 | ✅ Confirmed | @Driftah9 | — | 2026-03-09 |
+| CyberPower CP550HG / SX550G | 0764:0501 | v15.13 | ✅ Confirmed | @Driftah9 | — | 2026-03-09 |
 
 ---
 
@@ -83,19 +83,23 @@ These use the standard USB HID Power Device class. Expected to work via generic 
 
 ## Metrics Reference
 
-What each confirmed metric means:
-
-| Field | Description | Unit |
-|-------|-------------|------|
-| `ups.status` | OL (on-line), OB (on battery), CHRG (charging), LB (low battery) | string |
-| `battery.charge` | Battery charge percentage | % |
-| `battery.runtime` | Estimated runtime remaining | seconds |
-| `battery.voltage` | Battery voltage (not available on all models) | V |
-| `input.voltage` | AC input voltage | V |
-| `output.voltage` | AC output voltage | V |
-| `ups.load` | Load percentage | % |
+| Field | Description | Unit | Notes |
+|-------|-------------|------|-------|
+| `ups.status` | OL / OB / CHRG / DISCHRG / LB | string | Live decoded |
+| `battery.charge` | Battery charge | % | Live decoded |
+| `battery.charge.low` | Low battery threshold | % | From device DB |
+| `battery.charge.warning` | Warning threshold | % | From device DB |
+| `battery.runtime` | Estimated runtime remaining | seconds | Live decoded |
+| `battery.runtime.low` | Low runtime threshold | seconds | From device DB |
+| `battery.voltage` | Battery voltage | V | Live, not all models |
+| `battery.voltage.nominal` | Nominal battery voltage | V | From device DB |
+| `input.voltage` | AC input voltage | V | GET_REPORT, APC only |
+| `input.voltage.nominal` | Nominal input voltage | V | From device DB |
+| `output.voltage` | AC output voltage | V | GET_REPORT, APC only |
+| `ups.type` | UPS topology | string | From device DB |
+| `ups.load` | Load percentage | % | Pending Phase 2 |
 
 ---
 
 *This file is automatically updated when a compatibility report issue is labeled `confirmed`.*  
-*Last manual seed: 2026-03-13*
+*Last manual seed: 2026-03-15 — v15.13*

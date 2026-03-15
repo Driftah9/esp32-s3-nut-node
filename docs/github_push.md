@@ -22,6 +22,14 @@ main
 v15.13
 
 ## Commit Message
-- README.md restored and updated to v15.13
-- Added NUT Variables lightbox, full NUT variable table, updated source file list
-- Hot-unplug feature and NUT static variable parity documented
+- All project docs updated to v15.13
+- HISTORY.md: Phase 4 added (v15.9-v15.13), lesson #7 USB hotplug
+- MILESTONES.md: M9/M10/M11 confirmed, M12/M13/M14 added
+- DECISIONS.md: D012-D015 added (hotplug, DB design, page buffer, CLI rule)
+- TODO.md: Phase 1 fully resolved, all completed tasks marked done
+- REVERT-INDEX.md: REVERT-0019 (v15.12) and REVERT-0020 (v15.13) added
+- COMPATIBLE-UPS.md: v15.13, NUT vars table, PID=0601 section
+- confirmed-ups.md: v15.13, expanded metrics reference
+- docs/DOC-REGISTRY.md: created - per-file update rules for all tracked docs
+- Global CLAUDE.md: Doc Sync Workflow added, mandatory for all projects
+- Project CLAUDE.md: points to DOC-REGISTRY.md as authoritative doc source

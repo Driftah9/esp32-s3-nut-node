@@ -1,7 +1,7 @@
 # ESP32-S3 NUT Node — Development History
 **Project:** esp32-s3-nut-node  
 **Hardware:** ESP32-S3 (16MB flash, 8MB PSRAM) + USB OTG  
-**Final Version:** v15.8 (2026-03-09)  
+**Current Version:** v15.13 (2026-03-15)  
 **GitHub:** https://github.com/Driftah9/esp32-s3-nut-node
 
 ---
@@ -160,7 +160,7 @@ task drains one per 10ms loop.
 
 ---
 
-## Confirmed Working Devices at v15.8
+## Confirmed Working Devices at v15.13
 
 | Device | VID:PID | Decode Path | Data Available |
 |--------|---------|-------------|----------------|
@@ -211,3 +211,58 @@ app_main()
 6. **HID descriptor parsing requires context tracking** — the same Usage ID (e.g.,
    0x0030 = Voltage) means different NUT variables depending on which Collection it
    appears in (Input vs Output vs PowerSummary).
+
+7. **USB hotplug requires careful flag ordering** — the `s_cleanup_pending` flag must
+   be set BEFORE `s_dev_gone` in the client event callback to prevent `intr_in_cb`
+   from resubmitting transfers during cleanup. `portMAX_DELAY` in the USB lib task
+   also prevents cleanup — use a bounded 50ms timeout with a 1-tick yield.
+
+---
+
+## Phase 4 — NUT Parity + Portal Enhancement (v15.9–v15.13)
+
+### v15.9–v15.11 — Portal Refactor + Runtime Fix
+
+- `http_portal.c` split into four modules: `http_portal.c`, `http_dashboard.c`,
+  `http_config_page.c`, `http_compat.c` — each with single responsibility
+- AJAX `addOrUpdate()` ID mismatch fixed — td IDs now consistent between static HTML
+  and dynamic AJAX updates
+- Live wall clock added to dashboard: `Now: H:MM:SS AM/PM | Last poll: H:MM:SS AM/PM`
+- `rid=0x21` CyberPower runtime fix — decoded as 16-bit LE seconds (authoritative)
+- `rid=0x82` silenced — was incorrectly decoded as runtime; it is the static 300s
+  low-battery runtime threshold
+- APC Smart-UPS PID=0x0003 added to device DB with correct UID mappings
+
+### v15.12 — USB Hotplug Fix + NUT Variable Parity
+
+**USB Hotplug Fix (hub.c:837 assert):**
+- Root cause: ESP-IDF hub.c race condition when USB device disconnected mid-transfer
+- Fix: `s_cleanup_pending` volatile flag set in `client_event_cb` BEFORE `s_dev_gone`
+- `intr_in_cb` checks both flags before resubmitting
+- `usb_lib_task` changed from `portMAX_DELAY` to `pdMS_TO_TICKS(50)` + `vTaskDelay(1)`
+- `cleanup_device()` adds `vTaskDelay(pdMS_TO_TICKS(20))` before `usb_host_device_close()`
+- Confirmed: 2 clean unplug/replug cycles, no assert, no panic
+
+**NUT Variable Parity (Phase 1):**
+- `ups_device_db` extended with 6 NUT static fields per device entry:
+  `battery_voltage_nominal_mv`, `battery_runtime_low_s`, `battery_charge_low`,
+  `battery_charge_warning`, `input_voltage_nominal_v`, `ups_type`
+- All 12 device DB entries populated from NUT DDL + confirmed device testing
+- `nut_server.c` now serves: `battery.voltage.nominal`, `battery.runtime.low`,
+  `battery.charge.warning`, `input.voltage.nominal`, `ups.type`, `ups.test.result`,
+  `ups.delay.shutdown`, `ups.delay.start`, `ups.timer.reboot`, `ups.timer.shutdown`
+- All new variables confirmed live in Home Assistant after flash
+- Driver version bumped to 15.12
+
+### v15.13 — NUT Variables Lightbox + /status JSON Expansion
+
+- `/status` JSON endpoint expanded with all DB static fields:
+  `battery_voltage_nominal_v`, `battery_runtime_low_s`, `battery_charge_low`,
+  `battery_charge_warning`, `input_voltage_nominal_v`, `ups_type`, `ups_firmware`,
+  `device_mfr`, `device_model`, `device_serial`, `driver_version`
+- NUT Variables lightbox added to portal dashboard — click to see full `upsc`-style
+  variable list fetched live from `/status`, grouped as battery/input/output/ups/device/driver
+- Header shows `upsc ups@<ip>:3493` command; `ups.status` colour-coded green/amber
+- `HTTP_PAGE_BUF` increased 8192 → 16384 to accommodate expanded dashboard HTML
+- CLAUDE.md workflow updated: build/flash are manual steps, PowerShell hard rule enforced
+- README.md restored and updated to v15.13 with full feature and variable tables

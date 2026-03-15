@@ -72,68 +72,56 @@
 
 ---
 
+### M9 — USB Hotplug Stability
+**Confirmed:** v15.12 (2026-03-15)
+- hub.c:837 assert fixed via `s_cleanup_pending` flag + `usb_lib_task` 50ms timeout
+- 2 confirmed clean unplug/replug cycles, no panic, no reboot
+- NUT server polling continued uninterrupted during hotplug test
+
+### M10 — Full NUT Variable Parity (Phase 1)
+**Confirmed:** v15.12 (2026-03-15)
+- All static NUT variables now served per device from DB
+- `battery.voltage.nominal`, `battery.runtime.low`, `battery.charge.warning`,
+  `input.voltage.nominal`, `ups.type`, `ups.test.result`, `ups.delay.shutdown`,
+  `ups.timer.reboot` all confirmed live in Home Assistant
+
+### M11 — NUT Variables Portal Lightbox
+**Confirmed:** v15.13 (2026-03-15)
+- Full `upsc`-style variable list accessible from portal dashboard
+- `/status` JSON expanded with all static DB fields
+- Confirmed working in browser: all groups render, live data, `×` closes
+
+---
+
 ## 🔄 Next Milestones
 
-### M6 — UPS Hot-Plug Stability
-**Goal:** Plug/unplug UPS without deadlock or firmware crash
+### M12 — NUT Variable Parity Phase 2 (Live Variables)
+**Goal:** Decode `ups.load`, `input.voltage` live, `output.frequency` from GET_REPORT
 **Success criteria:**
-- Unplug UPS → ups_state.valid goes false, NUT returns safe defaults
-- Replug UPS → re-enumerates cleanly, ups_state.valid returns true
-- No watchdog resets during plug/unplug cycle
-- Tested 5x plug/unplug without failure
-**Relevant code:** ups_usb_hid.c — reattach logic
-**Reference:** ups_usb_hid_M15_reattach_patch.c, ups_usb_hid_v14_8_2_reattach_fixed.c
+- `ups.load` decoded for CyberPower (correct rid identified and wired)
+- `input.voltage` live (not just nominal) for CyberPower
+- `output.frequency` decoded and served
 
-### M7 — Extended HID Report Coverage
-**Goal:** Decode additional UPS report IDs for richer telemetry
-**Current confirmed report IDs:**
-- 0x0C — battery charge + runtime
-- 0x13 — AC present
-- 0x16 — flags
-- 0x21 — input voltage
-**Candidates to add:**
-- Output voltage (probed in ups_hid_parser_v14_4_output_voltage_probe_dropin.c)
-- Temperature (if available on this UPS)
-- Battery test status
-- Alarm / fault flags
-**Success criteria:** Each new variable confirmed via upsc with correct real-world value
+### M13 — Zigbee Coprocessor (ESP32-H2)
+**Goal:** Optional ESP32-H2 add-on for Zigbee UPS state broadcast
+**Prerequisites:** ESP32-H2 hardware obtained by Stryder
+**Design:** S3 handles USB HID + NUT; H2 handles Zigbee transport via UART
+- Zigbee is opt-in — base firmware unchanged without H2
+- H2 presence detected on boot via UART ping
 
-### M8 — /status JSON Endpoint Polish
-**Goal:** HTTP /status route returns structured JSON useful for dashboards/HA
-**Success criteria:**
-- Returns ups_state.valid + all confirmed NUT variables
-- Includes last_update timestamp
-- Returns appropriate values when ups_state.valid = false (not stale data)
-- JSON structure documented
-
-### M9 — Home Assistant Integration
-**Goal:** HA can poll or receive UPS data without a full NUT server install
-**Options to evaluate:**
-1. NUT integration in HA (uses upsc under the hood) — may just work already
-2. HTTP sensor polling /status JSON endpoint
-3. MQTT publish from ESP32 (new module)
-**Success criteria:** At least battery.charge, ups.status, input.utility.present
-visible as HA entities
-
-### M10 — NVS Config Hardening
-**Goal:** Configuration survives power loss and unexpected resets
-**Success criteria:**
-- All portal-saved settings survive hard power cycle
-- Factory reset mechanism (button hold or portal option)
-- Config version field to handle future schema changes
-
-### M11 — OTA Firmware Update
-**Goal:** Flash new firmware over Wi-Fi without USB cable
-**Success criteria:**
-- OTA endpoint in HTTP portal or dedicated URL
-- Rollback to previous firmware if new firmware fails to boot
-- REVERT anchor updated after confirmed OTA
+### M14 — USB Hub Multi-UPS Support
+**Goal:** Support multiple UPS devices via USB hub on the ESP32-S3 OTG port
+**Prerequisites:** Research max devices ESP-IDF USB Host can handle simultaneously
+**Questions to answer:**
+- Max simultaneous HID devices supported by ESP-IDF USB Host
+- Memory/IRAM impact per additional device
+- NUT naming convention for multiple UPS (ups1, ups2, etc.)
 
 ---
 
 ## 🗂 Deferred / Future
 
 - **STARTTLS / NUT TLS:** Low priority — plaintext sufficient for LAN-only use
-- **Multi-UPS support:** Single UPS per device is fine for current use case
-- **Windows Server (10.0.0.22) NUT client:** Test upsc from Windows once M9 done
-- **PCB / enclosure:** Hardware packaging once firmware is fully stable
+- **PCB / enclosure:** Hardware packaging once firmware fully stable
+- **OTA firmware update:** Flash over WiFi without USB cable
+- **NUT INSTCMD:** `test.battery.start`, shutdown commands via USB control transfer

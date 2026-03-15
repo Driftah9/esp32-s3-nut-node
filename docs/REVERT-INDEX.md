@@ -115,6 +115,36 @@ idf.py build flash -p COM3
 
 ---
 
+## REVERT-0019 — Firmware v15.12 (USB hotplug fix + NUT variable parity)
+**Status:** ✅ CONFIRMED FLASHED 2026-03-15
+**What works:**
+- USB hotplug fix — hub.c:837 assert resolved, 2 clean cycles confirmed
+- NUT variable parity Phase 1 — all static vars confirmed live in HA
+- `battery.voltage.nominal`, `battery.runtime.low`, `battery.charge.warning`,
+  `input.voltage.nominal`, `ups.type`, `ups.test.result` all served
+- HA entities: `sensor.ups_nominal_battery_voltage`, `sensor.ups_nominal_input_voltage`,
+  `sensor.ups_ups_type` all confirmed reading correctly
+- Driver version: 15.12
+**NUT variables added:** battery.voltage.nominal, battery.runtime.low,
+  battery.charge.warning, input.voltage.nominal, ups.type, ups.test.result,
+  ups.delay.shutdown, ups.delay.start, ups.timer.reboot, ups.timer.shutdown
+
+---
+
+## REVERT-0020 — Firmware v15.13 (NUT lightbox + /status expansion)
+**Status:** ✅ CONFIRMED FLASHED 2026-03-15
+**What works:**
+- All of v15.12 +
+- NUT Variables lightbox in portal — confirmed working in browser
+- `/status` JSON expanded with full DB static fields
+- `HTTP_PAGE_BUF` 16384 — dashboard renders completely without truncation
+- README.md restored and current
+- CLAUDE.md: PowerShell hard rule, build/flash manual steps enforced
+- All docs updated to v15.13
+**Binary size:** 923,072 bytes | **IRAM:** 25% (89,600 / 358,144 bytes)
+
+---
+
 ## Adding new anchors
 When a new milestone is confirmed end-to-end:
 1. Add entry here with REVERT-XXXX (next number)
