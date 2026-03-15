@@ -138,11 +138,13 @@ For Session 16:
 ## Pending Tasks
 
 | Task | Priority | Status |
-|------|----------|--------|
-| Fix AJAX charge/runtime not updating dynamically | High | Next |
-| Analyse discharge logs for rid=0x82 runtime behaviour | High | Next |
-| Live wall clock in portal poll div | Medium | Next |
-| Occasional OL flicker during OB debounce | Low | Pending |
-| git tag v15.10 | Low | Cleans up dirty version string |
-| AP password | Done | ✅ |
-| Z2M TCP keepalive | Done | ✅ |
+|------|----------|---------|
+| git tag v15.12 + push tag | Low | Pending — cleans dirty version string |
+| Web portal NUT lightbox | Medium | Designed, not yet built |
+| GitHub issue #1 comment | Medium | Point APC Smart-UPS C reporter to v15.12 |
+| Phase 2: ups.load (CyberPower rid?) | Low | Pending — correct rid not identified |
+| Phase 2: input.voltage live | Low | Pending — needs GET_REPORT path |
+| Phase 2: output.frequency | Low | Pending — needs GET_REPORT path |
+| IRAM headroom audit | Medium | At 99.99% — audit before next code addition |
+| ups_hid_desc.c split | Low | At ~630 lines, split recommended |
+| Occasional OL flicker during OB | Low | Rare, not critical |

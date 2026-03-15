@@ -11,9 +11,9 @@ Each entry was submitted via a [UPS Compatibility Report](https://github.com/Dri
 
 | Device | VID:PID | Firmware | Status | Submitted by | Issue | Date |
 |--------|---------|----------|--------|--------------|-------|------|
-| APC Back-UPS XS 1500M | 051D:0002 | v15.8 | ✅ Confirmed | @Driftah9 | — | 2026-03-09 |
-| APC Back-UPS BR1000G | 051D:0002 | v15.8 | ✅ Confirmed | @Driftah9 | — | 2026-03-09 |
-| CyberPower CP550HG / SX550G | 0764:0501 | v15.8 | ✅ Confirmed | @Driftah9 | — | 2026-03-09 |
+| APC Back-UPS XS 1500M | 051D:0002 | v15.12 | ✅ Confirmed | @Driftah9 | — | 2026-03-09 |
+| APC Back-UPS BR1000G | 051D:0002 | v15.12 | ✅ Confirmed | @Driftah9 | — | 2026-03-09 |
+| CyberPower CP550HG / SX550G | 0764:0501 | v15.12 | ✅ Confirmed | @Driftah9 | — | 2026-03-09 |
 
 ---
 

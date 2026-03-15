@@ -1,8 +1,8 @@
 # Project State — esp32-s3-nut-node
 
 ## Last Updated
-Date: 2026-03-14 (CLI Session)
-Updated by: CLI
+Date: 2026-03-15 (Session 17 — Desktop)
+Updated by: Claude Desktop
 
 ---
 
@@ -11,34 +11,31 @@ Updated by: CLI
 | Field | Value |
 |-------|-------|
 | Project Version | v15.12 |
-| Overall Status | 🟢 Verified — flashed and hotplug tested |
-| Last Action | Flash + 120s monitor — USB hotplug fix verification |
-| Last Action Result | PASS — 2 full disconnect/reconnect cycles, no assert, no crash |
+| Overall Status | 🟢 Verified — flashed, NUT parity confirmed in HA |
+| Last Action | Phase 1 NUT variable parity — build, flash, HA validation, GitHub push |
+| Last Action Result | PASS — all new NUT vars live in HA, build.log removed from GitHub |
 
 ---
 
-## Last CLI Run
+## Last Manual Run (Session 17)
 
-### Command
-```bash
-idf.py flash -p COM3
-# then 120s pyserial monitor — docs\monitor.log
-```
+### What was done
+- `ups_device_db.h/c` — 6 NUT static fields added to all 12 device entries
+- `nut_server.c` — now serves battery.voltage.nominal, battery.runtime.low,
+  battery.charge.warning, input.voltage.nominal, ups.type (per DB), plus static:
+  ups.test.result, ups.delay.shutdown, ups.delay.start, ups.timer.reboot, ups.timer.shutdown
+- DRIVER_VERSION bumped to 15.12
+- `.gitignore` updated — docs/build.log, docs/monitor.log excluded from tracking
+- build.log removed from GitHub via `git rm --cached`
+- GitHub push completed — v15.12 tag pending
 
-### Result
-- Flash: SUCCESS (exit 0)
-- Monitor: 693 lines captured over 120s
-- Hotplug cycle 1 (t≈2005s): `Device 1 gone` → graceful cleanup → `Waiting for NEW_DEV` → `Device opened` in ~3.8s
-- Hotplug cycle 2 (t≈2019s): Same clean path — reinit in ~7.3s
-- No `hub.c:837 assert`, no Guru Meditation, no panic
-- NUT server polling active throughout: `[#17] connect/disconnect` from 10.0.0.10
-- UPS still showing OB DISCHRG at time of test (running on battery during hotplug test)
-
-### Outcome
-- [x] Build passed
-- [x] Flash successful
-- [x] hub.c:837 hotplug fix VERIFIED — 2 cycles clean
-- [ ] GitHub push — pending (run .\git-push.ps1)
+### HA Validation Result
+- `sensor.ups_nominal_battery_voltage` = 12.0 V ✅
+- `sensor.ups_nominal_input_voltage` = 120 V ✅
+- `sensor.ups_ups_type` = line-interactive ✅
+- `sensor.ups_ups_shutdown_delay` = 20 ✅
+- `sensor.ups_battery_charge` = 94% ✅
+- `sensor.ups_status` = Online ✅
 
 ---
 
@@ -46,12 +43,15 @@ idf.py flash -p COM3
 
 | Issue | Severity | Status |
 |-------|----------|--------|
-| IRAM nearly full (99.99%) | Medium | Monitor — may cause issues if code grows |
-| App version string dirty tag | Low | Cosmetic — fix with git tag v15.12 after push |
+| IRAM nearly full (99.99%) | Medium | Monitor — any new IRAM_ATTR function will fail to link |
+| App version string dirty tag | Low | Cosmetic — run git tag v15.12 |
+| ups.load MISSING for CyberPower | Low | Pending — correct rid not yet identified |
 
 ---
 
 ## Next Recommended Step
 
-1. GitHub push: `.\git-push.ps1` from project root
-2. git tag v15.12 after successful push
+1. `git tag v15.12 && git push origin v15.12` — clean version string
+2. Web portal NUT lightbox — show all NUT vars via popup (designed, not yet built)
+3. GitHub issue #1 comment — point APC Smart-UPS C reporter to v15.12
+4. Phase 2 NUT vars — ups.load, input.voltage live, output.frequency (needs GET_REPORT)

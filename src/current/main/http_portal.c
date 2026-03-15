@@ -19,6 +19,12 @@
               Remove inline PORTAL_CSS (lives in http_portal_css.h)
               All fixes applied: AJAX ID mismatch, CP rid=0x21 runtime,
               Smart-UPS C uid cache additions, wall clock
+ R19  v15.13  /status JSON expanded: DB static fields added
+              (battery_voltage_nominal_v, battery_runtime_low_s,
+              battery_charge_low, battery_charge_warning,
+              input_voltage_nominal_v, ups_type, ups_firmware,
+              device_mfr, device_model, device_serial, driver_version)
+              Added ups_device_db.h include for DB lookup on /status.
 
 ============================================================================*/
 
@@ -46,6 +52,7 @@
 #include "cfg_store.h"
 #include "wifi_mgr.h"
 #include "ups_state.h"
+#include "ups_device_db.h"
 
 static const char *TAG = "http_portal";
 
@@ -270,8 +277,12 @@ static void handle_http_client(app_cfg_t *cfg, int fd) {
         ups_state_t ups;
         ups_state_snapshot(&ups);
 
-        char json[640];
+        /* Look up DB entry for static NUT fields */
+        const ups_device_entry_t *db = ups_device_db_lookup(ups.vid, ups.pid);
+
+        char json[1024];
         char bvolt_s[20], load_s[12], runtime_s[12], ivolt_s[20], ovolt_s[20];
+        char bvolt_nom_s[20], runtime_low_s[12], ivolt_nom_s[12];
 
         if (ups.battery_voltage_valid)
             snprintf(bvolt_s, sizeof(bvolt_s), "%.3f", ups.battery_voltage_mv / 1000.0f);
@@ -293,6 +304,19 @@ static void handle_http_client(app_cfg_t *cfg, int fd) {
             snprintf(ovolt_s, sizeof(ovolt_s), "%.3f", ups.output_voltage_mv / 1000.0f);
         else strlcpy0(ovolt_s, "null", sizeof(ovolt_s));
 
+        /* Static DB fields — null if unknown */
+        if (db && db->battery_voltage_nominal_mv)
+            snprintf(bvolt_nom_s, sizeof(bvolt_nom_s), "%.1f", db->battery_voltage_nominal_mv / 1000.0f);
+        else strlcpy0(bvolt_nom_s, "null", sizeof(bvolt_nom_s));
+
+        if (db && db->battery_runtime_low_s)
+            snprintf(runtime_low_s, sizeof(runtime_low_s), "%lu", (unsigned long)db->battery_runtime_low_s);
+        else strlcpy0(runtime_low_s, "null", sizeof(runtime_low_s));
+
+        if (db && db->input_voltage_nominal_v)
+            snprintf(ivolt_nom_s, sizeof(ivolt_nom_s), "%u", db->input_voltage_nominal_v);
+        else strlcpy0(ivolt_nom_s, "null", sizeof(ivolt_nom_s));
+
         snprintf(json, sizeof(json),
             "{"
             "\"ap_ssid\":\"%s\","
@@ -302,18 +326,40 @@ static void handle_http_client(app_cfg_t *cfg, int fd) {
             "\"nut_port\":3493,"
             "\"ups_status\":\"%s\","
             "\"battery_charge\":%u,"
+            "\"battery_charge_low\":%u,"
+            "\"battery_charge_warning\":%u,"
             "\"battery_runtime_s\":%s,"
+            "\"battery_runtime_low_s\":%s,"
             "\"battery_voltage_v\":%s,"
+            "\"battery_voltage_nominal_v\":%s,"
             "\"ups_load_pct\":%s,"
             "\"input_voltage_v\":%s,"
+            "\"input_voltage_nominal_v\":%s,"
             "\"output_voltage_v\":%s,"
+            "\"ups_type\":\"%s\","
+            "\"ups_firmware\":\"%s\","
+            "\"device_mfr\":\"%s\","
+            "\"device_model\":\"%s\","
+            "\"device_serial\":\"%s\","
+            "\"driver_version\":\"15.13\","
             "\"ups_valid\":%s,"
             "\"ap_active\":%s"
             "}",
             cfg->ap_ssid, cfg->sta_ssid, sta_ip, cfg->ups_name,
             ups.ups_status[0] ? ups.ups_status : "UNKNOWN",
             ups.battery_charge,
-            runtime_s, bvolt_s, load_s, ivolt_s, ovolt_s,
+            db ? (unsigned)db->battery_charge_low    : 10u,
+            db ? (unsigned)db->battery_charge_warning : 50u,
+            runtime_s, runtime_low_s,
+            bvolt_s, bvolt_nom_s,
+            load_s,
+            ivolt_s, ivolt_nom_s,
+            ovolt_s,
+            (db && db->ups_type) ? db->ups_type : "line-interactive",
+            ups.ups_firmware[0] ? ups.ups_firmware : "unknown",
+            ups.manufacturer[0] ? ups.manufacturer : "unknown",
+            ups.product[0]      ? ups.product      : "unknown",
+            ups.serial[0]       ? ups.serial        : "unknown",
             ups.valid               ? "true" : "false",
             wifi_mgr_ap_is_active() ? "true" : "false");
 

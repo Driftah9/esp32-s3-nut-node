@@ -19,16 +19,16 @@ public
 main
 
 ## Version
-v15.12
+v15.13
 
 ## Commit Message
-- http_portal.c refactored: split into http_portal.c, http_dashboard.c, http_config_page.c
-- AJAX id mismatch fixed: addOrUpdate id now matches static HTML td ids (td_charge etc)
-- Wall clock added to dashboard: shows Now/Last poll in H:MM:SS AM/PM format
-- rid=0x21 CyberPower runtime fixed: 16-bit LE seconds, authoritative source
-- rid=0x82 silenced: static 300s threshold, was incorrectly decoded as runtime
-- APC Smart-UPS PID 0x0003 added to device DB with non-standard UID mappings
-- ups_usb_hid.c: graceful USB hot-unplug fix for hub.c:837 assert on DEV_GONE
-- NUT variable parity: added battery.voltage.nominal, battery.runtime.low, battery.charge.warning, input.voltage.nominal, ups.type, ups.test.result, ups.delay.shutdown, ups.timer.reboot per device from DB
-- ups_device_db: NUT static fields added to all 12 device entries (confirmed + expected)
-- nut_server: driver version 15.12, all new NUT variables served and confirmed in HA
+- NUT Variables lightbox added to portal dashboard: click to see full upsc-style variable list
+- Lightbox fetches /status live, grouped as battery/input/output/ups/device/driver
+- Shows upsc ups@<ip>:3493 command in header, ups.status coloured green/amber
+- /status JSON expanded: now includes battery_voltage_nominal_v, battery_runtime_low_s,
+  battery_charge_low, battery_charge_warning, input_voltage_nominal_v, ups_type,
+  ups_firmware, device_mfr, device_model, device_serial, driver_version
+- HTTP_PAGE_BUF increased 8192 -> 16384 to accommodate expanded dashboard
+- http_portal.c: ups_device_db lookup on /status for per-device static fields
+- Dashboard and driver row version strings bumped to v15.13
+- CLAUDE.md updated: build/flash are manual steps, CLI must not run idf.py

@@ -13,6 +13,6 @@
 #include "cfg_store.h"
 #include <stddef.h>
 
-#define HTTP_PAGE_BUF 8192
+#define HTTP_PAGE_BUF 16384
 
 void render_dashboard(app_cfg_t *cfg, char *out, size_t outsz);
