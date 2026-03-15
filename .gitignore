@@ -33,3 +33,8 @@ src/current/hid_debug.log
 # ── OS ────────────────────────────────────────────────────────────────────────
 Thumbs.db
 .DS_Store
+
+# ── Session / runtime logs (local only) ──────────────────────────────────────
+docs/build.log
+docs/monitor.log
+docs/build_output.log
