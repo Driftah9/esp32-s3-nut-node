@@ -24,3 +24,6 @@ Thumbs.db
 # Claude workspace
 .claude/
 
+# Internal Claude workflow files and logs
+# These are excluded via docs/.gitignore - see that file
+

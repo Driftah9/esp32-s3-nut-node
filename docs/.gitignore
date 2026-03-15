@@ -1,0 +1,18 @@
+# Internal Claude workflow files - not for GitHub
+# This file lives in docs/ so paths are relative to docs/
+
+project_state.md
+next_steps.md
+github_push.md
+DOC-REGISTRY.md
+INTEGRITY.md
+*_session_log.md
+
+# Superseded docs
+NEXT_MILESTONES.md
+
+# Build and runtime logs
+build_output.log
+build.log
+monitor.log
+size_out.txt
