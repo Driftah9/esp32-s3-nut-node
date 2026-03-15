@@ -10,10 +10,10 @@ Updated by: Claude Desktop
 
 | Field | Value |
 |-------|-------|
-| Project Version | v15.12 |
-| Overall Status | 🟢 Verified — flashed, NUT parity confirmed in HA |
-| Last Action | Phase 1 NUT variable parity — build, flash, HA validation, GitHub push |
-| Last Action Result | PASS — all new NUT vars live in HA, build.log removed from GitHub |
+| Project Version | v15.13 |
+| Overall Status | 🟢 Verified — flashed, lightbox confirmed working, pushed |
+| Last Action | NUT Variables lightbox + /status JSON expansion |
+| Last Action Result | PASS — lightbox opens, all groups render correctly, pushed v15.13 |
 
 ---
 

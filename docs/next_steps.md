@@ -139,12 +139,11 @@ For Session 16:
 
 | Task | Priority | Status |
 |------|----------|---------|
-| git tag v15.12 + push tag | Low | Pending — cleans dirty version string |
-| Web portal NUT lightbox | Medium | Designed, not yet built |
-| GitHub issue #1 comment | Medium | Point APC Smart-UPS C reporter to v15.12 |
-| Phase 2: ups.load (CyberPower rid?) | Low | Pending — correct rid not identified |
-| Phase 2: input.voltage live | Low | Pending — needs GET_REPORT path |
+| git tag v15.13 | Low | ✅ Done — tagged and pushed |
+| Web portal NUT lightbox | Medium | ✅ Done — v15.13 confirmed working |
+| Phase 2: ups.load (CyberPower rid?) | Medium | Pending — correct rid not identified |
+| Phase 2: input.voltage live | Medium | Pending — needs GET_REPORT path |
 | Phase 2: output.frequency | Low | Pending — needs GET_REPORT path |
-| IRAM headroom audit | Medium | At 99.99% — audit before next code addition |
+| IRAM headroom audit | Low | IRAM at 25% — no immediate concern |
 | ups_hid_desc.c split | Low | At ~630 lines, split recommended |
 | Occasional OL flicker during OB | Low | Rare, not critical |
