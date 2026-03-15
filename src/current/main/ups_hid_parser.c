@@ -1,4 +1,4 @@
-/*============================================================================
+﻿/*============================================================================
  MODULE: ups_hid_parser
 
  RESPONSIBILITY
@@ -194,15 +194,18 @@ void ups_hid_parser_set_descriptor(const hid_desc_t *desc)
                 break;
             case HID_USAGE_BS_RUNTIMETOEMPTY:   /* 0x68 */
             case 0x0073u:                        /* 0x73 APC non-standard RunTimeToEmpty */
+            case 0x0085u:                        /* 0x85 APC Smart-UPS RunTimeToEmpty */
                 if (!s_cache.battery_runtime) s_cache.battery_runtime = f;
                 break;
             case 0x0083u:
                 if (!s_cache.battery_voltage) s_cache.battery_voltage = f;
                 break;
             case HID_USAGE_BS_CHARGING:         /* 0x44 */
+            case 0x008Bu:                        /* 0x8B APC Smart-UPS charging flag */
                 if (!s_cache.charging_flag) s_cache.charging_flag = f;
                 break;
             case HID_USAGE_BS_DISCHARGING:      /* 0x45 */
+            case 0x002Cu:                        /* 0x2C APC Smart-UPS discharging flag */
                 if (!s_cache.discharging_flag) s_cache.discharging_flag = f;
                 break;
             case HID_USAGE_BS_BELOWREMCAPLIMIT: /* 0x42 */
@@ -316,16 +319,31 @@ static bool decode_cyberpower_direct(uint8_t rid,
                      ac ? " (ignored, rid=0x29 authoritative)" : " -> AC LOST");
         }
         break;
-    case 0x82:
+    case 0x21:
+        /*
+         * rid=0x21 = RunTimeToEmpty (16-bit little-endian, seconds).
+         * Confirmed from discharge logs: counts down correctly during OB.
+         *   0x0D84 = 3460s (~57 min at start of discharge)
+         *   0x0A79 = 2681s (~44 min later)
+         * This is the authoritative runtime source for CyberPower PID 0501.
+         */
         if (plen >= 2) {
             uint16_t runtime_s = (uint16_t)(p[0] | ((uint16_t)p[1] << 8));
-            if (runtime_s < 65000u) {
+            if (runtime_s > 0 && runtime_s < 65000u) {
                 upd->battery_runtime_valid = true;
                 upd->battery_runtime_s     = runtime_s;
                 changed = true;
-                ESP_LOGI(TAG, "[CP] battery.runtime=%us", runtime_s);
+                ESP_LOGI(TAG, "[CP] battery.runtime=%us (rid=0x21)", runtime_s);
             }
         }
+        break;
+    case 0x82:
+        /*
+         * rid=0x82 = RemainingTimeLimit (battery.runtime.low threshold).
+         * Value is STATIC at 300s (5m) — this is NOT current runtime.
+         * Confirmed from discharge logs: never changes during OB.
+         * Do NOT use for battery_runtime — silently ignore.
+         */
         break;
     case 0x88:
         if (plen >= 2) {
@@ -378,7 +396,7 @@ static bool decode_cyberpower_direct(uint8_t rid,
         }
         break;
     /* Unresolved reports — silently ignore */
-    case 0x21: case 0x22: case 0x25: case 0x28:
+    case 0x22: case 0x25: case 0x28:
     case 0x86: case 0x87:
         break;
     default:

@@ -1,8 +1,10 @@
-idf_component_register(SRCS
+﻿idf_component_register(SRCS
     "main.c"
     "cfg_store.c"
     "wifi_mgr.c"
     "http_portal.c"
+    "http_dashboard.c"
+    "http_config_page.c"
     "http_compat.c"
     "nut_server.c"
     "ups_state.c"

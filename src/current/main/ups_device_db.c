@@ -1,4 +1,4 @@
-/*============================================================================
+﻿/*============================================================================
  MODULE: ups_device_db
 
  REVERT HISTORY
@@ -116,6 +116,19 @@ static const ups_device_entry_t s_db[] = {
         .decode_mode = DECODE_APC_BACKUPS,
         .quirks      = QUIRK_VENDOR_PAGE_REMAP | QUIRK_NEEDS_GET_REPORT,
         .known_good  = true,
+    },
+    {
+        /* APC Smart-UPS C / Smart-UPS (PID 0x0003) — standard HID path
+           Descriptor has runtime at uid=0x0085, charge at rid=0x0C,
+           charging at uid=0x008B, discharging at uid=0x002C.
+           Confirmed: Smart-UPS C 1500 FW:UPS 15.1 (issue #1, needs-validation) */
+        .vid         = 0x051D,
+        .pid         = 0x0003,
+        .vendor_name = "APC",
+        .model_hint  = "Smart-UPS C / Smart-UPS (PID 0003)",
+        .decode_mode = DECODE_STANDARD,
+        .quirks      = QUIRK_VENDOR_PAGE_REMAP,
+        .known_good  = false,
     },
     {
         /* VID-only fallback: Smart-UPS and others may use standard path */

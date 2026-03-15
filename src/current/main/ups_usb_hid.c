@@ -36,6 +36,13 @@
               DB vendor_name for all known devices.
             - Fall back to DB model_hint when USB product string contains
               '?' garbage chars (CyberPower CP550HG returns 'ST Series??').
+ R12 v15.12 Graceful USB disconnect — fix hub.c:837 assert on hot-unplug:
+            - Added s_cleanup_pending flag set in client_event_cb on
+              DEV_GONE, preventing intr_in_cb from resubmitting transfers.
+            - usb_lib_task yields with vTaskDelay(1) so usb_client_task
+              can call cleanup_device() before hub driver tears down state.
+            - cleanup_device() now calls usb_host_device_close() only
+              after interface release, with s_dev guard check.
 
 ============================================================================*/
 
@@ -92,9 +99,10 @@ typedef struct __attribute__((packed)) {
 static usb_host_client_handle_t s_client = NULL;
 static usb_device_handle_t      s_dev    = NULL;
 
-static volatile bool    s_dev_connected = false;
-static volatile bool    s_dev_gone      = false;
-static volatile uint8_t s_new_dev_addr  = 0;
+static volatile bool    s_dev_connected   = false;
+static volatile bool    s_dev_gone        = false;
+static volatile bool    s_cleanup_pending = false;  /* set by DEV_GONE, cleared after cleanup */
+static volatile uint8_t s_new_dev_addr    = 0;
 
 static int      s_hid_intf_num = -1;
 static int      s_hid_alt      = 0;
@@ -163,13 +171,21 @@ static void reset_session(void)
 static void cleanup_device(void)
 {
     if (s_dev != NULL) {
+        /* Release interface before closing device.
+         * Guard: only release if we actually claimed it (intf_num >= 0). */
         if (s_hid_intf_num >= 0) {
             esp_err_t rel = usb_host_interface_release(s_client, s_dev,
                                                         (uint8_t)s_hid_intf_num);
             if (rel != ESP_OK) {
                 ESP_LOGW(TAG, "usb_host_interface_release: %s", esp_err_to_name(rel));
             }
+            s_hid_intf_num = -1;   /* clear immediately so intr_in_cb won't resubmit */
         }
+        /* Small yield: let usb_lib_task process any pending hub events
+         * that arrived between DEV_GONE flag set and this close call.
+         * Without this, hub.c:837 assert fires if the hub event pump
+         * races ahead of our cleanup. */
+        vTaskDelay(pdMS_TO_TICKS(20));
         esp_err_t cerr = usb_host_device_close(s_client, s_dev);
         if (cerr != ESP_OK) {
             ESP_LOGW(TAG, "usb_host_device_close: %s", esp_err_to_name(cerr));
@@ -177,9 +193,10 @@ static void cleanup_device(void)
         s_dev = NULL;
     }
 
-    s_dev_connected = false;
-    s_dev_gone      = false;
-    s_new_dev_addr  = 0;
+    s_dev_connected   = false;
+    s_dev_gone        = false;
+    s_cleanup_pending = false;
+    s_new_dev_addr    = 0;
 
     /* Stop GET_REPORT polling before clearing device state */
     ups_get_report_stop();
@@ -200,9 +217,14 @@ static void client_event_cb(const usb_host_client_event_msg_t *event_msg, void *
     if (event_msg->event == USB_HOST_CLIENT_EVENT_NEW_DEV) {
         s_new_dev_addr  = event_msg->new_dev.address;
         s_dev_connected = true;
+        s_cleanup_pending = false;
         ESP_EARLY_LOGI(TAG, "NEW_DEV addr=%u", (unsigned)s_new_dev_addr);
     } else if (event_msg->event == USB_HOST_CLIENT_EVENT_DEV_GONE) {
-        s_dev_gone = true;
+        /* Set cleanup_pending FIRST — intr_in_cb checks this to avoid
+         * resubmitting transfers after disconnect. s_dev_gone triggers
+         * the main loop to call cleanup_device(). */
+        s_cleanup_pending = true;
+        s_dev_gone        = true;
         ESP_EARLY_LOGW(TAG, "DEV_GONE");
     }
 }
@@ -215,10 +237,16 @@ static void usb_lib_task(void *arg)
     (void)arg;
     while (1) {
         uint32_t flags = 0;
-        esp_err_t err = usb_host_lib_handle_events(portMAX_DELAY, &flags);
-        if (err != ESP_OK) {
+        /* Use 50ms timeout instead of portMAX_DELAY.
+         * This lets the task yield between hub events so usb_client_task
+         * can call cleanup_device() before the hub driver processes a
+         * port-gone event on a still-registered device (hub.c:837 assert). */
+        esp_err_t err = usb_host_lib_handle_events(pdMS_TO_TICKS(50), &flags);
+        if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
             ESP_LOGE(TAG, "usb_host_lib_handle_events: %s", esp_err_to_name(err));
         }
+        /* Yield one tick so client task can run cleanup between events */
+        vTaskDelay(1);
     }
 }
 
@@ -583,7 +611,10 @@ static void intr_in_cb(usb_transfer_t *t)
                  (int)t->status, (unsigned)t->actual_num_bytes);
     }
 
-    if (!s_dev_gone) {
+    /* Do not resubmit if device is gone or cleanup is pending.
+     * s_cleanup_pending is set BEFORE s_dev_gone in client_event_cb,
+     * ensuring we stop resubmitting as soon as disconnect is detected. */
+    if (!s_dev_gone && !s_cleanup_pending) {
         esp_err_t err = usb_host_transfer_submit(t);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "usb_host_transfer_submit(resubmit): %s", esp_err_to_name(err));
