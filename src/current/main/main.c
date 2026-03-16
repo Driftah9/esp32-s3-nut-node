@@ -2,8 +2,8 @@
  ESP32-S3 UPS NUT Node
  CORE ORCHESTRATOR
 
- VERSION: v15.10
- DATE: 2026-03-14
+ VERSION: v15.14
+ DATE: 2026-03-16
  ESP-IDF: v5.3.1
 
  REVERT HISTORY
@@ -47,7 +47,7 @@ static ups_state_t g_ups;
 
 void app_main(void) {
     ESP_LOGI(TAG, "=======================================");
-    ESP_LOGI(TAG, "ESP32 UPS NUT Node - v15.10");
+    ESP_LOGI(TAG, "ESP32 UPS NUT Node - v15.14");
     ESP_LOGI(TAG, "ESP-IDF v5.3.1 target");
     ESP_LOGI(TAG, "=======================================");
 

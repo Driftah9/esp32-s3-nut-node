@@ -10,7 +10,7 @@
  R1  v15.11  Fix AJAX addOrUpdate ID mismatch (tr_charge->charge etc)
              Fix rid=0x21 runtime source for CyberPower
              Add uid=0x0085/0x008B/0x002C to parser cache (Smart-UPS C)
- R2  v15.13  NUT Variables lightbox: click link to see full upsc-style
+ R2  v15.14  NUT Variables lightbox: click link to see full upsc-style
              variable list fetched live from /status JSON. Groups:
              battery / input / ups / device / driver.
              Version strings bumped to 15.13.
@@ -149,12 +149,12 @@ void render_dashboard(app_cfg_t *cfg, char *out, size_t outsz)
         "</style>"
         "</head><body>"
         "<h2>ESP32-S3 UPS Node</h2>"
-        "<div class='subtitle'>v15.13 &mdash; NUT server on tcp/3493</div>"
+        "<div class='subtitle'>v15.14 &mdash; NUT server on tcp/3493</div>"
         "%s"
         "<table id='ups_tbl'>"
         "<tr><th>Manufacturer</th><td>%s</td></tr>"
         "<tr><th>Model</th><td>%s</td></tr>"
-        "<tr><th>Driver</th><td>esp32-nut-hid v15.13</td></tr>"
+        "<tr><th>Driver</th><td>esp32-nut-hid v15.14</td></tr>"
         "<tr><th>Status</th><td id='td_status' class='%s'>%s</td></tr>"
         "%s"
         "<tr><th>STA IP</th><td id='td_ip'>%s</td></tr>"
