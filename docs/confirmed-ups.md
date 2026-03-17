@@ -14,6 +14,7 @@ Each entry was submitted via a [UPS Compatibility Report](https://github.com/Dri
 | APC Back-UPS XS 1500M | 051D:0002 | v15.13 | ✅ Confirmed | @Driftah9 | — | 2026-03-09 |
 | APC Back-UPS BR1000G | 051D:0002 | v15.13 | ✅ Confirmed | @Driftah9 | — | 2026-03-09 |
 | CyberPower CP550HG / SX550G | 0764:0501 | v15.13 | ✅ Confirmed | @Driftah9 | — | 2026-03-09 |
+| APC Smart-UPS C 1500 | 051D:0003 | v15.15 | ✅ Confirmed | @omarkhali | #1 | 2026-03-17 |
 
 ---
 
@@ -58,7 +59,7 @@ These use the standard USB HID Power Device class. Expected to work via generic 
 
 | Manufacturer | VID | Models | Notes |
 |-------------|-----|--------|-------|
-| APC Smart-UPS | 051D | SMT750I, SMT1500I, SMX series | Different PID from Back-UPS |
+| APC Smart-UPS | 051D | SMT750I, SMT1500I, SMX series | PID=0003, same decode path as confirmed Smart-UPS C 1500 |
 | Eaton / MGE | 0463 | 3S, 5E, 5P, Ellipse, Evolution, Powerware | Standard HID |
 | Tripp Lite | 09AE | SMART series, OMNI series | May need GET_REPORT |
 | Belkin | 050D | F6C series, Universal UPS | Standard HID |
@@ -102,4 +103,4 @@ These use the standard USB HID Power Device class. Expected to work via generic 
 ---
 
 *This file is automatically updated when a compatibility report issue is labeled `confirmed`.*  
-*Last manual seed: 2026-03-15 — v15.13*
+*Last manual seed: 2026-03-17 — v15.15*

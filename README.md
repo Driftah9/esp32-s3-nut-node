@@ -4,12 +4,22 @@ ESP32-S3 firmware that turns a USB UPS into a network-accessible NUT (Network UP
 
 The ESP32 connects to the UPS via USB HID, decodes the interrupt stream and feature reports, and speaks the NUT protocol natively over TCP. Any standard NUT client (`upsc`, `upsmon`, Home Assistant) can query it directly.
 
-**Current version:** v15.13 | **Status:** Production
+**Current version:** v15.15 | **Status:** Production
 
 ---
 
 > 💛 **If this project saves you a Raspberry Pi, consider buying me a coffee!**  
 > [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/B0B2DKG8N)
+
+---
+
+## Community
+
+**Discord** — join for direct help, device testing chat, and faster feedback than GitHub issues:  
+👉 [discord.gg/KeaP4K2wRq](http://www.discord.gg/KeaP4K2wRq)
+
+**StryderTech Projects** — submit UPS validation logs with large data sets that don't fit in a GitHub issue comment:  
+👉 [projects.strydertech.com](https://projects.strydertech.com/)
 
 ---
 
@@ -51,6 +61,7 @@ The ESP32 connects to the UPS via USB HID, decodes the interrupt stream and feat
 | APC Back-UPS XS 1500M | 051D:0002 | ✅ Confirmed |
 | APC Back-UPS BR1000G | 051D:0002 | ✅ Confirmed |
 | CyberPower CP550HG / SX550G | 0764:0501 | ✅ Confirmed |
+| APC Smart-UPS C 1500 | 051D:0003 | ✅ Confirmed |
 
 Full compatibility list: [`docs/confirmed-ups.md`](docs/confirmed-ups.md)
 
@@ -143,7 +154,7 @@ Host: <ESP32-IP>   Port: 3493   UPS name: ups
 | `device.serial` | USB descriptor | |
 | `device.type` | static | ups |
 | `driver.name` | static | esp32-nut-hid |
-| `driver.version` | static | 15.13 |
+| `driver.version` | static | 15.15 |
 
 ---
 
@@ -199,13 +210,33 @@ scripts/              — Utility scripts (submission validation, etc.)
 If your UPS connects and reports data correctly — **please submit a compatibility report!**  
 It helps other users know what works, and your device gets added to the confirmed list.
 
-👉 [Submit a UPS Compatibility Report](https://github.com/Driftah9/esp32-s3-nut-node/issues/new?template=ups-compatibility-report.yml)
+👉 [Submit a UPS Compatibility Report](https://github.com/Driftah9/esp32-s3-nut-node/issues/new?template=ups-compatibility-report.yml) — for standard reports
 
-What you'll need:
-- UPS brand and model
-- USB VID:PID (shown in the web portal or serial log)
-- First 200 lines of serial log from a fresh boot with the UPS connected
+👉 [projects.strydertech.com](https://projects.strydertech.com/) — for large log submissions that don't fit in a GitHub comment
+
+👉 [Discord](http://www.discord.gg/KeaP4K2wRq) — for live help and direct feedback during testing
+
+### What to include
+
+**Required:**
+- UPS brand, model, and power rating (e.g. APC Smart-UPS C 1500VA)
+- USB VID:PID (shown in the web portal or serial log at boot)
 - Firmware version (shown in portal subtitle or boot banner)
+- Full serial log from a fresh boot with the UPS connected (at minimum until `HID report descriptor parsed` appears)
+
+**Recommended — run this sequence for the most useful validation data:**
+
+1. **Boot with UPS connected** — let it run for 2-3 minutes on AC power. Confirm `ups.status = OL` in the portal and that `battery.charge` and `battery.runtime` are showing valid values.
+
+2. **Unplug UPS from wall** — watch serial log for `OB DISCHRG` status, confirming on-battery detection. Leave on battery for 2-3 minutes.
+
+3. **Reconnect UPS to wall** — confirm status returns to `OL` or `OL CHRG`. This validates the full AC present/absent cycle.
+
+4. **Unplug USB cable from ESP32** — confirm `DEV_GONE` appears in the log without a crash. Reconnect and confirm `NEW_DEV` fires and the device re-enumerates cleanly.
+
+5. **Let the log run for 5+ minutes** — this captures at least one GET_REPORT polling cycle (every 30s) and confirms no spurious reboots.
+
+The full sequence above takes about 10-15 minutes and gives us everything needed to mark a device as confirmed working.
 
 ## Found a Bug?
 
