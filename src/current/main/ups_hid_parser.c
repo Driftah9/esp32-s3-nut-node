@@ -600,8 +600,14 @@ static void derive_status(ups_state_update_t *upd)
 
     if (!utility_known) {
         if (upd->battery_charge_valid) {
-            /* Charge data only — conservatively assume on-line */
-            strlcpy(upd->ups_status, "OL", sizeof(upd->ups_status));
+            /* Charge data only — conservatively assume on-line.
+             * EXCEPTION: DECODE_APC_SMARTUPS has rid=0x07 as authoritative
+             * status source. Charge-only reports (rid=0x0C, rid=0x0D) must
+             * not overwrite OB DISCHRG with OL. Leave empty — no opinion. */
+            ups_decode_mode_t mode = s_device ? s_device->decode_mode : DECODE_STANDARD;
+            if (mode != DECODE_APC_SMARTUPS) {
+                strlcpy(upd->ups_status, "OL", sizeof(upd->ups_status));
+            }
         }
         /* else: no opinion — leave ups_status empty, g_state unchanged */
         return;
