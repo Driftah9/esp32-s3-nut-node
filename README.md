@@ -198,7 +198,8 @@ scripts/              — Utility scripts (submission validation, etc.)
 | Document | Description |
 |----------|-------------|
 | [docs/HISTORY.md](docs/HISTORY.md) | Full development history |
-| [docs/confirmed-ups.md](docs/confirmed-ups.md) | Community-confirmed compatible devices |
+| [docs/confirmed-ups.md](docs/confirmed-ups.md) | Community-confirmed compatible UPS devices |
+| [docs/confirmed-boards.md](docs/confirmed-boards.md) | Community-confirmed compatible ESP32-S3 boards |
 | [docs/COMPATIBLE-UPS.md](docs/COMPATIBLE-UPS.md) | Compatible UPS quick reference |
 | [docs/usbhid-ups-compat.md](docs/usbhid-ups-compat.md) | Full HID Usage ID + NUT variable reference |
 | [docs/REVERT-INDEX.md](docs/REVERT-INDEX.md) | Stable revert points |
@@ -222,6 +223,7 @@ It helps other users know what works, and your device gets added to the confirme
 - UPS brand, model, and power rating (e.g. APC Smart-UPS C 1500VA)
 - USB VID:PID (shown in the web portal or serial log at boot)
 - Firmware version (shown in portal subtitle or boot banner)
+- ESP32-S3 board model, flash size, and PSRAM (shown in the serial boot log as `SPI Flash Size`)
 - Full serial log from a fresh boot with the UPS connected (at minimum until `HID report descriptor parsed` appears)
 
 **Recommended — run this sequence for the most useful validation data:**

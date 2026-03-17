@@ -48,8 +48,43 @@ body:
     id: firmware_version
     attributes:
       label: "Firmware Version"
-      description: "Shown in the portal subtitle (e.g. v15.9) or serial boot banner (`App version:`)"
-      placeholder: "v15.9"
+      description: "Shown in the portal subtitle (e.g. v15.15) or serial boot banner (`App version:`)"
+      placeholder: "v15.15"
+    validations:
+      required: true
+
+  - type: input
+    id: board_model
+    attributes:
+      label: "ESP32-S3 Board Model"
+      description: "The specific board you are using. Check your board's label or product page."
+      placeholder: "Hosyond ESP32-S3-WROOM-1 N16R8"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: board_flash
+    attributes:
+      label: "Board Flash Size"
+      description: "Shown in the serial boot log as `SPI Flash Size`. If unsure, check your board's datasheet."
+      options:
+        - "4MB"
+        - "8MB"
+        - "16MB"
+        - "Other / Unknown"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: board_psram
+    attributes:
+      label: "Board PSRAM"
+      description: "Check your board's product page. Many ESP32-S3 devkits list this as R2 (2MB), R8 (8MB), or none."
+      options:
+        - "None"
+        - "2MB (R2)"
+        - "8MB (R8)"
+        - "Other / Unknown"
     validations:
       required: true
 
