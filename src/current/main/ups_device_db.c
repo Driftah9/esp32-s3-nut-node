@@ -170,19 +170,22 @@ static const ups_device_entry_t s_db[] = {
         .ups_type                   = "line-interactive",
     },
     {
-        /* APC Smart-UPS C / Smart-UPS (PID 0x0003) — standard HID path
-         * Descriptor has runtime at uid=0x0085, charge at rid=0x0C,
-         * charging at uid=0x008B, discharging at uid=0x002C.
-         * NUT DDL: battery.voltage.nominal=24V, runtime.low=120s,
-         * charge.low=10%, charge.warning=50%.
-         * Status: needs-validation (issue #1, Smart-UPS C 1500). */
+        /* APC Smart-UPS C / Smart-UPS (PID 0x0003)
+         * Confirmed: Smart-UPS C 1500 (issue #1, v15.14 log, Omar).
+         * runtime arrives as undocumented interrupt-IN rid=0x0D (uint16 LE, seconds)
+         * status arrives as undocumented interrupt-IN rid=0x07 (bit2=AC, bit1=discharging)
+         * charge arrives as descriptor-declared Input rid=0x0C uid=0x0066
+         * charging/discharging flags at rid=0x06 uid=0x008B/0x002C (descriptor Input)
+         * These are NOT in the descriptor as Input — direct decode required.
+         * QUIRK_NEEDS_GET_REPORT: rid=0x06 charging flags + rid=0x0E battery.voltage
+         * via Feature reports (same as Back-UPS GET_REPORT path). */
         .vid         = 0x051D,
         .pid         = 0x0003,
         .vendor_name = "APC",
         .model_hint  = "Smart-UPS C / Smart-UPS (PID 0003)",
-        .decode_mode = DECODE_STANDARD,
-        .quirks      = QUIRK_VENDOR_PAGE_REMAP,
-        .known_good  = false,
+        .decode_mode = DECODE_APC_SMARTUPS,
+        .quirks      = QUIRK_VENDOR_PAGE_REMAP | QUIRK_NEEDS_GET_REPORT,
+        .known_good  = true,
         .battery_voltage_nominal_mv = 24000,
         .battery_runtime_low_s      = 120,
         .battery_charge_low         = 10,
