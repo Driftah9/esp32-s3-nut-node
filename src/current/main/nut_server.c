@@ -67,7 +67,7 @@
 
 static const char *TAG = "nut_server";
 static const char *DRIVER_NAME    = "esp32-nut-hid";
-static const char *DRIVER_VERSION = "15.15";
+static const char *DRIVER_VERSION = "15.16";
 static const char *DEVICE_TYPE    = "ups";              /* standard NUT device.type value */
 static const char *BATTERY_TYPE   = "PbAc";          /* sealed lead-acid — all APC Back-UPS */
 static const char *UPS_TYPE       = "line-interactive"; /* all Back-UPS series */

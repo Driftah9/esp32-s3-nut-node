@@ -39,3 +39,9 @@ docs/build.log
 docs/monitor.log
 docs/build_output.log
 docs/size_out.txt
+
+# ── PowerShell scripts — local tooling only ──────────────────────────────────
+# Only git-push.ps1 is tracked. All other .ps1 files are temporary session
+# scripts (apply patches, one-off fixes) and must not enter the repo.
+*.ps1
+!git-push.ps1
