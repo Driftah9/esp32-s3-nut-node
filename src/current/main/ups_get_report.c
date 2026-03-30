@@ -494,11 +494,23 @@ void ups_get_report_service_queue(void)
     /* Non-blocking peek — if nothing pending, return immediately */
     if (xQueueReceive(s_request_queue, &req, 0) != pdTRUE) return;
 
-    /* Request 16 bytes — rid=0x07 is a 9-byte response (1 rid + 8 data).
-     * Extra headroom is harmless; short-read is handled by len check. */
+    /* Request size must match what the device expects in wLength.
+     * Requesting too many bytes causes some devices to STALL the control
+     * transfer rather than returning a short response.
+     *
+     * Eaton/MGE: rid=0x20 is declared as 1 byte in the descriptor (plus
+     * 1 rid echo byte = 2 bytes total). Requesting 16 causes a STALL/timeout.
+     * Use 2 bytes for Eaton to exactly match the declared report size.
+     *
+     * APC / others: 16 bytes is safe — their Feature reports are larger
+     * and the devices tolerate over-sized wLength requests. */
     uint8_t buf[16];
+    size_t  buf_sz = sizeof(buf);
+    if (s_entry && s_entry->decode_mode == DECODE_EATON_MGE) {
+        buf_sz = 2u;  /* rid=0x20: 1 rid echo + 1 charge byte; rid=0xFD: same */
+    }
     size_t  got = 0;
-    esp_err_t err = do_get_feature_report(req.rid, buf, sizeof(buf), &got);
+    esp_err_t err = do_get_feature_report(req.rid, buf, buf_sz, &got);
     if (err == ESP_OK && got > 0) {
         if (s_entry && s_entry->decode_mode == DECODE_APC_BACKUPS) {
             decode_apc_feature(req.rid, buf, got);
