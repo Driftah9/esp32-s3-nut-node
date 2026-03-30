@@ -173,6 +173,8 @@ void ups_hid_parser_set_descriptor(const hid_desc_t *desc)
         ESP_LOGI(TAG, "Decode mode: APC Back-UPS (direct + standard combined)");
     } else if (s_device && s_device->decode_mode == DECODE_APC_SMARTUPS) {
         ESP_LOGI(TAG, "Decode mode: APC Smart-UPS (direct INT-IN + GET_REPORT)");
+    } else if (s_device && s_device->decode_mode == DECODE_EATON_MGE) {
+        ESP_LOGI(TAG, "Decode mode: EATON/MGE (direct INT-IN undocumented rids)");
     } else {
         ESP_LOGI(TAG, "Decode mode: STANDARD (generic HID descriptor path)");
     }
@@ -687,6 +689,14 @@ bool ups_hid_parser_decode_report(const uint8_t *data, size_t len,
             changed = true;
         }
         /* Fall through - standard path picks up rid=0x0C charge (Input). */
+    } else if (mode == DECODE_EATON_MGE) {
+        /* Eaton/MGE: undocumented interrupt-IN rids carry all live UPS state.
+           Standard descriptor path yields nothing useful (all MISSING).
+           GET_REPORT supplies battery.charge via rid=0x20 (handled in
+           ups_get_report.c, not here). Interrupt-IN decode is a future task
+           pending capture of undeclared rids 0x2x/0x8x raw data.
+           For now: fall through to standard path - it will find nothing,
+           but charge arrives via GET_REPORT -> ups_state_apply_update. */
     }
 
     /* ---- Standard descriptor path ---- */

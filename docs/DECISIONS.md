@@ -152,8 +152,37 @@ Windows ESP-IDF toolchain.
 
 ---
 
+## D016 - Per-vendor device DB split (v15.17)
+**Decision:** Split ups_device_db.c flat table into per-vendor files:
+  ups_db_apc.c, ups_db_cyberpower.c, ups_db_eaton.c, ups_db_standard.c.
+  ups_device_db.c becomes a pure coordinator that merges vendor tables.
+**Reason:** Single monolithic table means fixing a broken Eaton decode requires
+editing the same file as APC and CyberPower logic. Per-vendor isolation means
+a regression in one vendor's decode cannot affect others. Mirrors NUT's own
+apc-hid.c / mge-hid.c / cps-hid.c / belkin-hid.c subdriver pattern.
+Standard-path vendors (Tripp Lite, Belkin, Liebert, HP, Dell) share one file
+because they require no custom decode - matching NUT's belkin-hid.c grouping.
+**Implemented:** v15.17 (2026-03-30)
+
+---
+
+## D017 - DECODE_EATON_MGE mode for Eaton 3S PID FFFF (v15.17)
+**Decision:** Add DECODE_EATON_MGE = 4 decode mode. Assign to Eaton 3S
+(PID 0xFFFF) as a confirmed known_good entry in ups_db_eaton.c.
+battery.charge sourced from GET_REPORT rid=0x20 byte[1] (confirmed).
+Interrupt-IN undeclared rids (0x2x, 0x8x) are received but not yet decoded.
+**Reason:** The Eaton 3S HID descriptor declares only vendor-page 0xFFFF fields
+which are all skipped by the parser. All standard field cache entries are MISSING.
+The only confirmed live data path is GET_REPORT rid=0x20 for battery.charge,
+validated by two independent community submissions (2026-03-30).
+**Revisit trigger:** Once raw interrupt-IN data is captured during OB discharge,
+decode the 0x2x rids for status and runtime - add to ups_hid_parser.c.
+**Implemented:** v15.17 (2026-03-30)
+
+---
+
 ## Template for new decisions
-## DXXX — Short title
+## DXXX - Short title
 **Decision:** What was decided.
 **Reason:** Why.
 **Confirmed stable:** Version or date if applicable.

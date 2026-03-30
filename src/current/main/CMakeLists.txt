@@ -12,5 +12,9 @@
     "ups_hid_desc.c"
     "ups_hid_parser.c"
     "ups_device_db.c"
+    "ups_db_apc.c"
+    "ups_db_cyberpower.c"
+    "ups_db_eaton.c"
+    "ups_db_standard.c"
     "ups_get_report.c"
     INCLUDE_DIRS ".")

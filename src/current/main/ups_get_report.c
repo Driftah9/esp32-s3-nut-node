@@ -306,6 +306,15 @@ static const size_t  s_apc_rids_n          = sizeof(s_apc_rids) / sizeof(s_apc_r
  * Runtime arrives on interrupt-IN (rid=0x0D) so no GET_REPORT needed. */
 static const uint8_t s_apc_smartups_rids[] = { 0x06, 0x0E };
 static const size_t  s_apc_smartups_rids_n = sizeof(s_apc_smartups_rids) / sizeof(s_apc_smartups_rids[0]);
+/* Eaton/MGE (PID FFFF) Feature rids:
+ *   rid=0x20  battery.charge - byte[1] = charge% (0-100)
+ *             Confirmed from two 3S 700 submissions (2026-03-30).
+ *             Response: [0x20, charge_pct]  e.g. [0x20, 0x02] = 2%
+ *   rid=0xFD  unknown - returns 2 bytes [0xFD, 0x29], short read
+ *             Not decoded yet - logged for future analysis.
+ */
+static const uint8_t s_eaton_rids[]        = { 0x20, 0xFD };
+static const size_t  s_eaton_rids_n        = sizeof(s_eaton_rids) / sizeof(s_eaton_rids[0]);
 static const uint8_t s_tripplite_rids[]    = { 0x01, 0x0C };
 static const size_t  s_tripplite_rids_n    = sizeof(s_tripplite_rids) / sizeof(s_tripplite_rids[0]);
 
@@ -367,6 +376,59 @@ static void decode_apc_smartups_feature(uint8_t rid, const uint8_t *data, size_t
     }
 }
 
+/* ---- Decode Eaton/MGE Feature reports -------------------------------- */
+static void decode_eaton_feature(uint8_t rid, const uint8_t *data, size_t len)
+{
+    char hexbuf[32] = {0};
+    int  pos = 0;
+    size_t n = (len > 8u) ? 8u : len;
+    for (size_t i = 0; i < n; i++) {
+        pos += snprintf(hexbuf + pos, sizeof(hexbuf) - (size_t)pos,
+                        "%02X%s", data[i], (i == n-1u) ? "" : " ");
+    }
+    ESP_LOGI(TAG, "[MGE Feature] rid=0x%02X len=%u: %s", rid, (unsigned)len, hexbuf);
+
+    switch (rid) {
+    case 0x20: {
+        /*
+         * rid=0x20 = battery.charge (confirmed Eaton 3S 700, 2026-03-30)
+         * Response: [0x20, charge_pct]  byte[1] = charge 0-100%
+         * Two submissions both returned 0x02 (2%) - battery was depleted.
+         */
+        if (len < 2u) {
+            ESP_LOGW(TAG, "[MGE Feature] rid=0x20: short read %u bytes", (unsigned)len);
+            break;
+        }
+        uint8_t charge = data[1];
+        if (charge <= 100u) {
+            ups_state_update_t upd;
+            memset(&upd, 0, sizeof(upd));
+            upd.valid                 = true;
+            upd.battery_charge_valid  = true;
+            upd.battery_charge        = charge;
+            ups_state_apply_update(&upd);
+            ESP_LOGI(TAG, "[MGE Feature] battery.charge=%u%%", (unsigned)charge);
+        } else {
+            ESP_LOGW(TAG, "[MGE Feature] rid=0x20 charge=%u - out of range, ignoring", (unsigned)charge);
+        }
+        break;
+    }
+    case 0xFD:
+        /*
+         * rid=0xFD: returns 2 bytes [0xFD, 0x29] on Eaton 3S 700.
+         * Meaning unknown. Logged above for analysis. No decode yet.
+         * Candidates: firmware version, battery status flags, runtime low threshold.
+         */
+        if (len < 2u) {
+            ESP_LOGW(TAG, "[MGE Feature] rid=0xFD: short read %u bytes", (unsigned)len);
+        }
+        /* No decode - raw log above is sufficient for now */
+        break;
+    default:
+        break;
+    }
+}
+
 /* ---- Timer task - only posts to queue, does NO USB work -------------- */
 static void get_report_timer_task(void *arg)
 {
@@ -381,6 +443,9 @@ static void get_report_timer_task(void *arg)
     } else if (s_entry && s_entry->decode_mode == DECODE_APC_SMARTUPS) {
         rids   = s_apc_smartups_rids;
         rids_n = s_apc_smartups_rids_n;
+    } else if (s_entry && s_entry->decode_mode == DECODE_EATON_MGE) {
+        rids   = s_eaton_rids;
+        rids_n = s_eaton_rids_n;
     } else {
         rids   = s_tripplite_rids;
         rids_n = s_tripplite_rids_n;
@@ -439,6 +504,8 @@ void ups_get_report_service_queue(void)
             decode_apc_feature(req.rid, buf, got);
         } else if (s_entry && s_entry->decode_mode == DECODE_APC_SMARTUPS) {
             decode_apc_smartups_feature(req.rid, buf, got);
+        } else if (s_entry && s_entry->decode_mode == DECODE_EATON_MGE) {
+            decode_eaton_feature(req.rid, buf, got);
         }
         /* Future: add Tripp Lite decode branch here */
     }

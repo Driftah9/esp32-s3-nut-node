@@ -15,7 +15,7 @@
    standard HID descriptor path is used and a warning is logged.
 
  VERSION HISTORY
- R0  v15.4  Initial — extracted from ups_hid_parser.c hardcoded logic.
+ R0  v15.4  Initial - extracted from ups_hid_parser.c hardcoded logic.
  R1  v15.12 Added NUT static fields per device:
             battery_voltage_nominal_mv, battery_runtime_low_s,
             battery_charge_low, battery_charge_warning,
@@ -57,6 +57,7 @@ typedef enum {
     DECODE_CYBERPOWER   = 1,  /* CyberPower direct-decode bypass               */
     DECODE_APC_BACKUPS  = 2,  /* APC Back-UPS (PID 0002) direct-decode bypass  */
     DECODE_APC_SMARTUPS = 3,  /* APC Smart-UPS (PID 0003) direct-decode bypass */
+    DECODE_EATON_MGE    = 4,  /* Eaton/MGE (PID FFFF) - GET_REPORT + undocumented INT-IN rids */
 } ups_decode_mode_t;
 
 /* ---- Database entry -------------------------------------------------- */
