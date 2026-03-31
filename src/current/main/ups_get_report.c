@@ -560,7 +560,7 @@ void ups_get_report_start(usb_host_client_handle_t client,
              (int)entry->decode_mode);
 
     BaseType_t ret = xTaskCreatePinnedToCore(get_report_timer_task, "gr_timer",
-                                              2048, NULL, 3, &s_timer_task, 0);
+                                              4096, NULL, 3, &s_timer_task, 0);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "failed to create timer task");
         s_active      = false;
