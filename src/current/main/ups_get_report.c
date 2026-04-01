@@ -93,6 +93,25 @@ static volatile size_t          s_ctrl_pay_len  = 0;
 static void ctrl_cb(usb_transfer_t *t)
 {
     if (!t) return;
+
+    /* Log raw transfer outcome for every Eaton callback — critical for diagnosis */
+    ESP_LOGI(TAG, "[CTRL_CB] status=%d actual_bytes=%d",
+             (int)t->status, (int)t->actual_num_bytes);
+
+    /* Map transfer status to human-readable label */
+    const char *status_str;
+    switch (t->status) {
+        case USB_TRANSFER_STATUS_COMPLETED: status_str = "COMPLETED"; break;
+        case USB_TRANSFER_STATUS_ERROR:     status_str = "ERROR";     break;
+        case USB_TRANSFER_STATUS_TIMED_OUT: status_str = "TIMED_OUT"; break;
+        case USB_TRANSFER_STATUS_CANCELLED: status_str = "CANCELLED"; break;
+        case USB_TRANSFER_STATUS_STALL:     status_str = "STALL";     break;
+        case USB_TRANSFER_STATUS_OVERFLOW:  status_str = "OVERFLOW";  break;
+        case USB_TRANSFER_STATUS_SKIPPED:   status_str = "SKIPPED";   break;
+        default:                            status_str = "UNKNOWN";   break;
+    }
+    ESP_LOGI(TAG, "[CTRL_CB] transfer status: %s (%d)", status_str, (int)t->status);
+
     s_ctrl_status  = (t->status == USB_TRANSFER_STATUS_COMPLETED) ? ESP_OK : ESP_FAIL;
     s_ctrl_pay_len = 0;
     if (s_ctrl_status == ESP_OK && t->actual_num_bytes > 8u) {
@@ -100,6 +119,17 @@ static void ctrl_cb(usb_transfer_t *t)
         if (plen > CTRL_PAYLOAD_MAX) plen = CTRL_PAYLOAD_MAX;
         memcpy((void *)s_ctrl_payload, t->data_buffer + 8u, plen);
         s_ctrl_pay_len = plen;
+        /* Log raw payload bytes */
+        char hexbuf[64] = {0};
+        int  pos = 0;
+        for (size_t i = 0; i < plen && i < 16u; i++) {
+            pos += snprintf(hexbuf + pos, sizeof(hexbuf) - (size_t)pos,
+                            "%02X%s", t->data_buffer[8u + i], (i == plen-1u) ? "" : " ");
+        }
+        ESP_LOGI(TAG, "[CTRL_CB] payload (%u bytes): %s", (unsigned)plen, hexbuf);
+    } else if (s_ctrl_status == ESP_OK) {
+        ESP_LOGW(TAG, "[CTRL_CB] COMPLETED but actual_num_bytes=%d (<=8, no payload)",
+                 (int)t->actual_num_bytes);
     }
     usb_host_transfer_free(t);
     s_inflight  = NULL;
@@ -147,6 +177,11 @@ static esp_err_t do_get_feature_report(uint8_t rid, uint8_t *buf, size_t buf_sz,
     t->context          = NULL;
     t->num_bytes        = alloc;
 
+    /* Log exact setup packet bytes so we can verify bmRequestType, wValue, wIndex, wLength */
+    ESP_LOGI(TAG, "[SETUP] rid=0x%02X setup: %02X %02X %02X %02X %02X %02X %02X %02X intf=%d wlen=%u",
+             rid, s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
+             s_intf_num, (unsigned)buf_sz);
+
     s_ctrl_done    = false;
     s_ctrl_status  = ESP_FAIL;
     s_ctrl_pay_len = 0;
@@ -154,11 +189,13 @@ static esp_err_t do_get_feature_report(uint8_t rid, uint8_t *buf, size_t buf_sz,
 
     err = usb_host_transfer_submit_control(s_client, t);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "submit_control rid=0x%02X: %s", rid, esp_err_to_name(err));
+        ESP_LOGW(TAG, "[SETUP] submit_control rid=0x%02X FAILED: %s (0x%x)",
+                 rid, esp_err_to_name(err), (unsigned)err);
         s_inflight = NULL;
         usb_host_transfer_free(t);
         return err;
     }
+    ESP_LOGI(TAG, "[SETUP] submit_control rid=0x%02X OK - polling for callback", rid);
 
     /* Pump USB event loop until callback fires.
      * ctrl_cb always frees the transfer — caller must NOT free t after this point.
@@ -169,20 +206,28 @@ static esp_err_t do_get_feature_report(uint8_t rid, uint8_t *buf, size_t buf_sz,
     for (int i = 0; i < max && !s_ctrl_done; i++) {
         usb_host_client_handle_events(s_client, 0);
         vTaskDelay(slice);
+        /* Log progress at 500ms intervals so we can see if callback ever fires */
+        if ((i > 0) && (i % 100 == 0)) {
+            ESP_LOGW(TAG, "[SETUP] rid=0x%02X still waiting... (%dms elapsed, inflight=%s)",
+                     rid, i * 5, s_inflight ? "yes" : "no");
+        }
     }
 
     if (!s_ctrl_done) {
         /* Genuine timeout: callback never fired. Transfer is still registered
          * with the USB host. s_inflight remains set; on next DEV_GONE the
          * host will cancel the transfer and ctrl_cb will free it safely. */
-        ESP_LOGW(TAG, "GET_REPORT rid=0x%02X: timed out - transfer pending until DEV_GONE", rid);
+        ESP_LOGW(TAG, "GET_REPORT rid=0x%02X: timed out after 3000ms - inflight=%s",
+                 rid, s_inflight ? "yes (pending DEV_GONE cancel)" : "no (cb fired but s_ctrl_done not set?)");
         return ESP_FAIL;
     }
+
+    ESP_LOGI(TAG, "[SETUP] rid=0x%02X callback fired OK", rid);
 
     /* ctrl_cb has fired and freed the transfer. t is no longer valid.
      * Payload was copied into s_ctrl_payload before the free. */
     if (s_ctrl_status != ESP_OK) {
-        ESP_LOGW(TAG, "GET_REPORT rid=0x%02X: transfer failed", rid);
+        ESP_LOGW(TAG, "GET_REPORT rid=0x%02X: transfer completed with error status", rid);
         return ESP_FAIL;
     }
 
@@ -509,6 +554,12 @@ void ups_get_report_service_queue(void)
     if (s_entry && s_entry->decode_mode == DECODE_EATON_MGE) {
         buf_sz = 2u;  /* rid=0x20: 1 rid echo + 1 charge byte; rid=0xFD: same */
     }
+    /* Confirm effective parameters before issuing transfer */
+    ESP_LOGI(TAG, "[GR] rid=0x%02X mode=%d intf=%d wlen=%u",
+             req.rid,
+             s_entry ? (int)s_entry->decode_mode : -1,
+             s_intf_num,
+             (unsigned)buf_sz);
     size_t  got = 0;
     esp_err_t err = do_get_feature_report(req.rid, buf, buf_sz, &got);
     if (err == ESP_OK && got > 0) {
