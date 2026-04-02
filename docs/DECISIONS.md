@@ -181,6 +181,74 @@ decode the 0x2x rids for status and runtime - add to ups_hid_parser.c.
 
 ---
 
+## D018 - Eaton 3S interrupt-IN rid=0x06 decode (v15.18)
+**Decision:** Decode interrupt-IN rid=0x06 in ups_hid_parser.c DECODE_EATON_MGE branch.
+Format confirmed from mains-unplug capture (2026-04-02, Eaton 3S 700):
+  data[0] = 0x06 (rid)
+  data[1] = battery.charge (0-100%)
+  data[2:3] = battery.runtime_s uint16 LE (seconds)
+  data[4:5] = status flags (OL/OB decode pending - need OB discharge log)
+Sample: 06 63 B4 10 00 00 = charge=99%, runtime=4276s, flags=0x0000 (online)
+**Reason:** This is the primary real-time data path for Eaton 3S. Fires instantly
+on any mains state change. GET_REPORT rid=0x20 remains as fallback/initial value
+on connect before the first interrupt-IN packet arrives.
+**Revisit trigger:** Obtain on-battery discharge log to decode data[4:5] status flags
+and map to OL/OB DISCHRG NUT status string.
+**Implemented:** v15.18 (2026-04-02)
+
+---
+
+## D019 - NUT dynamic scanning + tri-mode operation as future fork (not in main)
+**Decision:** Dynamic HID scanning and a tri-mode operation model are deferred to a
+fork project (esp32-s3-nut-node-flex). This project (esp32-s3-nut-node) remains the
+stable main with known-device static decode paths. No dynamic changes to main.
+
+**Fork target behavior - three selectable modes via web portal:**
+
+  Mode 1 - STANDALONE (default, current behavior)
+    ESP decodes HID, serves NUT protocol on tcp/3493.
+    No external dependency. Works without any other infrastructure.
+    This is what esp32-s3-nut-node does today.
+
+  Mode 2 - NUT CLIENT
+    ESP still decodes HID locally, but pushes data upstream to a NUT server
+    (upsd) running on a host machine. ESP becomes a data source, not a server.
+    Useful for multi-UPS environments with a central NUT aggregator.
+    Config: upstream_host, upstream_port stored in NVS.
+    Protocol: standard NUT upsmon/upsd client flow.
+
+  Mode 3 - BRIDGE (dumb mode)
+    ESP forwards raw USB HID interrupt-IN stream and GET_REPORT responses
+    over TCP to an upstream host. ESP does zero HID decoding.
+    Upstream host runs NUT with libusb and handles all decode natively.
+    ESP sends HID Report Descriptor on connect as handshake, then streams.
+    Useful when paired with a NUT host - full libusb device support with
+    no per-device firmware changes needed.
+    Config: upstream_host, upstream_port stored in NVS.
+
+  Mode is selectable from the web portal config page, stored in NVS.
+  Modes 2 and 3 require upstream_host to be configured.
+  Fallback: if upstream unreachable, modes 2/3 can optionally fall back to Mode 1.
+
+**Dynamic scanning investigation (fork only):**
+  NUT's usbhid-ups on Linux uses libusb to:
+    1. Iterate descriptor-declared rids and attempt GET_REPORT on each
+    2. Passively accumulate all interrupt-IN rids into a live seen-set
+    3. Map HID usages to NUT variables via subdriver mapping tables
+  ESP constraints:
+    - Step 2 timing: interrupt-IN only starts after enumeration completes
+    - Step 1 cost: ~2s/rid on Eaton = impractical for full 0x01-0xFF scan
+    - Smarter approach: probe descriptor-declared rids only + short vendor list
+  NUT subdriver mapping table pattern (mge-hid.c format) is directly portable
+  to ESP and would replace manual byte-position decode across all vendors.
+
+**Fork project:** esp32-s3-nut-node-flex
+**Path:** D:\Users\Stryder\Documents\Claude\Projects\esp32-s3-nut-node-flex
+**Status:** Scaffolded, not yet implemented. Branched conceptually from v15.18.
+**Noted:** 2026-04-02
+
+---
+
 ## Template for new decisions
 ## DXXX - Short title
 **Decision:** What was decided.
