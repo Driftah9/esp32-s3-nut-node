@@ -609,9 +609,12 @@ done:
 
     /* Cross-check: warn about report IDs seen in interrupt data but not in descriptor.
      * We log this at WARN so it appears even without debug enabled.
-     * Known CyberPower reports from live monitor:
-     *   0x20, 0x21, 0x22, 0x23, 0x25, 0x28, 0x29,
-     *   0x80, 0x82, 0x85, 0x86, 0x87, 0x88
+     * These rids were first seen on CyberPower devices but also appear identically
+     * on Eaton 3S (PID FFFF) and potentially other vendors. The list is device-agnostic
+     * — it flags any undeclared rid we know carries live UPS state on at least one device.
+     * NOTE: This is a STATIC pre-seeded list built from prior submissions. The warning
+     * fires at enumeration time based on what the descriptor does NOT declare; it does NOT
+     * reflect what the currently connected device is actually sending at runtime.
      */
     static const uint8_t expected_rids[] = {
         0x20, 0x21, 0x22, 0x23, 0x25, 0x28, 0x29,

@@ -73,41 +73,30 @@ Only `usb_client_task` (in ups_usb_hid.c) may call USB host APIs.
 |--------|---------|-------------|--------|
 | APC Back-UPS (generic) | 051D:0002 | DECODE_APC_BACKUPS | Working - input voltage via GET_REPORT rid=0x17 |
 | APC Smart-UPS C 1500 | 051D:0003 | DECODE_APC_SMARTUPS | Working - charging/discharging flags, battery voltage |
-| Eaton 3S 700 | 0463:FFFF | DECODE_EATON_MGE | Partial - USB enum/NUT server OK, GET_REPORT blocked (see below) |
+| Eaton 3S 700 | 0463:FFFF | DECODE_EATON_MGE | Working - battery.charge + battery.runtime confirmed via interrupt-IN rid=0x06 and GET_REPORT rid=0x20 |
 
 ---
 
-## Current Active Bug: Eaton 3S GET_REPORT Timeout
+## Eaton 3S Status: WORKING (v15.18)
 
-### Symptom
-Every session, GET_REPORT control transfers for rid=0x20 and rid=0xFD time out
-after 3000ms. The transfer is submitted successfully (no submit error) but the
-UPS never responds and the callback never fires.
+### Confirmed Working (2026-04-02)
+- GET_REPORT rid=0x20: returns battery.charge byte, COMPLETED status, ~2s response time
+- GET_REPORT rid=0xFD: returns 2 bytes [FD 29], meaning TBD
+- Interrupt-IN rid=0x06: fires on mains state change, carries charge + runtime
+  - Confirmed: 06 63 B4 10 00 00 -> charge=99%, runtime=4276s on mains loss
+- battery.charge=2% was correct (depleted battery from earlier sessions)
+- battery.charge=99% confirmed with charged battery
+- NUT server stable, LIST VAR responds correctly across 12+ connections
 
-### History of fixes applied (all in ups_get_report.c)
-1. v15.17 patch 1: gr_timer stack 2048->4096 bytes - FIXED crash, timer now runs
-2. v15.17 patch 2: wLength 16->2 bytes for Eaton - NOT fixed, still times out
-3. v15.17 patch 3: Expanded logging throughout do_get_feature_report() and ctrl_cb
+### Fixes applied
+1. gr_timer stack 2048->4096 bytes (v15.17) - crash fixed
+2. wLength 16->2 bytes for Eaton GET_REPORT (v15.17) - timeout resolved
+3. USB_TRANSFER_STATUS_CANCELED spelling fix (v15.18)
+4. rid=0x06 interrupt-IN decode added (v15.18) - real-time charge + runtime
 
-### What the expanded logging will show
-Next tester log should contain lines starting with:
-- `[GR]`      - effective parameters (mode, intf, wlen) - confirms fix is in binary
-- `[SETUP]`   - exact 8 setup packet bytes before submit + poll progress at 500ms
-- `[CTRL_CB]` - raw transfer status enum (COMPLETED/STALL/ERROR/CANCELLED etc)
-
-### Likely root causes (narrowing down with logging build)
-A. Silent timeout - UPS ignores GET_REPORT after interface claim (EP0 frozen)
-   -> Fix: try issuing GET_REPORT before usb_host_interface_claim()
-B. STALL - UPS actively rejects rid=0x20 as Feature type
-   -> Fix: try report type=Input(1) or Output(2) instead of Feature(3)
-C. submit_control fails - ESP-IDF rejects transfer for state reason
-   -> Fix: check device/client handle validity, interface claim order
-
-### Known working baseline
-A v15.16-dirty build by the tester returned battery.charge=2% via GET_REPORT
-rid=0x20 in an earlier session (session 1 of staging log, 2026-03-30).
-The exact difference between that build and our v15.17 is unknown.
-This confirms the UPS CAN respond to GET_REPORT under the right conditions.
+### Open items
+- ups.status still UNKNOWN - rid=0x06 data[4:5] flags not yet decoded (need OB log)
+- rid=0xFD meaning unknown (returns 0x29=41 - possibly runtime in minutes)
 
 ### Eaton 3S HID Descriptor Notes
 - 111 fields, 10 report IDs, 926 bytes raw

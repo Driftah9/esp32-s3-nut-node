@@ -104,7 +104,7 @@ static void ctrl_cb(usb_transfer_t *t)
         case USB_TRANSFER_STATUS_COMPLETED: status_str = "COMPLETED"; break;
         case USB_TRANSFER_STATUS_ERROR:     status_str = "ERROR";     break;
         case USB_TRANSFER_STATUS_TIMED_OUT: status_str = "TIMED_OUT"; break;
-        case USB_TRANSFER_STATUS_CANCELLED: status_str = "CANCELLED"; break;
+        case USB_TRANSFER_STATUS_CANCELED:  status_str = "CANCELLED"; break;
         case USB_TRANSFER_STATUS_STALL:     status_str = "STALL";     break;
         case USB_TRANSFER_STATUS_OVERFLOW:  status_str = "OVERFLOW";  break;
         case USB_TRANSFER_STATUS_SKIPPED:   status_str = "SKIPPED";   break;

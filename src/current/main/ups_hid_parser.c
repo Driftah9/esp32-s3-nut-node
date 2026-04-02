@@ -691,12 +691,40 @@ bool ups_hid_parser_decode_report(const uint8_t *data, size_t len,
         /* Fall through - standard path picks up rid=0x0C charge (Input). */
     } else if (mode == DECODE_EATON_MGE) {
         /* Eaton/MGE: undocumented interrupt-IN rids carry all live UPS state.
-           Standard descriptor path yields nothing useful (all MISSING).
-           GET_REPORT supplies battery.charge via rid=0x20 (handled in
-           ups_get_report.c, not here). Interrupt-IN decode is a future task
-           pending capture of undeclared rids 0x2x/0x8x raw data.
-           For now: fall through to standard path - it will find nothing,
-           but charge arrives via GET_REPORT -> ups_state_apply_update. */
+         * Standard descriptor path yields nothing (all fields MISSING).
+         * GET_REPORT supplies battery.charge via rid=0x20 as fallback/initial value
+         * (handled in ups_get_report.c). Interrupt-IN is the primary real-time path.
+         *
+         * Confirmed interrupt-IN rids from Eaton 3S 700 (2026-04-02):
+         *   rid=0x06  [6 bytes]  State change notification. Fires on mains events.
+         *     data[0] = 0x06 (rid)
+         *     data[1] = battery.charge (0-100%)
+         *     data[2:3] = battery.runtime_s uint16 LE (seconds)
+         *     data[4:5] = status flags (0x00 0x00 = online/normal; OB decode TBD)
+         *
+         * Sample: 06 63 B4 10 00 00 fired on mains loss:
+         *   charge=0x63=99%, runtime=0x10B4=4276s (~71 min), flags=0x0000
+         */
+        if (rid == 0x06 && payload_len >= 5) {
+            uint8_t charge = payload[0];
+            uint16_t runtime_s = (uint16_t)(payload[1] | ((uint16_t)payload[2] << 8));
+            /* status flags in payload[3:4] - OB/OL decode TBD, need discharge log */
+            if (charge <= 100u) {
+                upd->battery_charge_valid = true;
+                upd->battery_charge       = charge;
+                changed = true;
+                ESP_LOGI(TAG, "[EATON] rid=0x06 battery.charge=%u%%", charge);
+            }
+            if (runtime_s > 0u) {
+                upd->battery_runtime_valid = true;
+                upd->battery_runtime_s     = runtime_s;
+                changed = true;
+                ESP_LOGI(TAG, "[EATON] rid=0x06 battery.runtime=%us", runtime_s);
+            }
+            ESP_LOGI(TAG, "[EATON] rid=0x06 raw: %02X %02X %02X %02X %02X",
+                     payload[0], payload[1], payload[2], payload[3], payload[4]);
+        }
+        /* All other Eaton rids: fall through to standard path (finds nothing, harmless) */
     }
 
     /* ---- Standard descriptor path ---- */
