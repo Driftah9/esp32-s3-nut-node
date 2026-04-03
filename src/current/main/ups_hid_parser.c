@@ -292,17 +292,46 @@ static bool decode_cyberpower_direct(uint8_t rid,
 {
     bool changed = false;
     switch (rid) {
-    case 0x20:
+    case 0x08:
+        /*
+         * rid=0x08 - primary real-time data packet for CyberPower PID 0601
+         * and BlueWalker/PowerWalker OEM devices.
+         *
+         * Confirmed from PowerWalker VI 3000 RLE (2026-04-02, v15.18):
+         *   byte0   = 0x08 (rid)
+         *   byte1   = battery.charge (0-100%), observed: 0x64=100%
+         *   byte2:3 = battery.runtime_s uint16 LE (seconds)
+         *             observed: 0x2A30=10800s (180 min), 0x198C=6540s (109 min)
+         *             value oscillates as UPS recalculates remaining runtime
+         *   byte4:5 = 0x2C 0x01 - status/flags (constant, meaning TBD)
+         *
+         * Fires every 2 seconds alternating with rid=0x0B.
+         * NOTE: rid=0x08 also appears in the HID descriptor (field cache
+         * finds battery.charge at rid=0x08 via uid=0x0066). The descriptor
+         * declares runtime at rid=0x08 uid=0x0068 but as 8-bit (max 255s)
+         * which is wrong - the actual value is 16-bit across bytes 2-3.
+         * Direct decode here overrides the descriptor for runtime.
+         */
         if (plen >= 1) {
             uint8_t charge = p[0];
             if (charge <= 100) {
                 upd->battery_charge_valid = true;
                 upd->battery_charge       = charge;
                 changed = true;
-                ESP_LOGI(TAG, "[CP] battery.charge=%u%%", charge);
+                ESP_LOGI(TAG, "[CP] rid=0x08 battery.charge=%u%%", charge);
+            }
+        }
+        if (plen >= 3) {
+            uint16_t runtime_s = (uint16_t)(p[1] | ((uint16_t)p[2] << 8));
+            if (runtime_s > 0 && runtime_s < 65000u) {
+                upd->battery_runtime_valid = true;
+                upd->battery_runtime_s     = runtime_s;
+                changed = true;
+                ESP_LOGI(TAG, "[CP] rid=0x08 battery.runtime=%us", runtime_s);
             }
         }
         break;
+    case 0x20:
     case 0x23:
         /* rid=0x23 carried input/output voltage on CyberPower — removed.
          * Voltage decode is not used in current NUT/HA integration.
@@ -674,7 +703,7 @@ bool ups_hid_parser_decode_report(const uint8_t *data, size_t len,
         if (decode_cyberpower_direct(rid, payload, payload_len, upd)) {
             changed = true;
         }
-        if (rid != 0x20) goto finalize;
+        if (rid != 0x20 && rid != 0x08) goto finalize;
     } else if (mode == DECODE_APC_BACKUPS) {
         /* APC Back-UPS: direct for vendor rids, then fall through to
            standard path to pick up charging/discharging from descriptor. */

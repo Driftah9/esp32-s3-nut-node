@@ -45,14 +45,26 @@ static const ups_device_entry_t s_cyberpower_entries[] = {
         .ups_type                   = "line-interactive",
     },
 
-    /* CyberPower OR/PR rackmount - same direct-decode path as 0x0501
-     * Rackmount units typically 24V battery
+    /* CyberPower OR/PR rackmount + BlueWalker/PowerWalker OEM rebrands.
+     * VID 0x0764 is registered to Cyber Power Systems Inc. BlueWalker
+     * (PowerWalker brand) uses the same firmware and PID on their VI RLE
+     * series - confirmed by NUT HCL issues #645 and #818, and by direct
+     * log submission (PowerWalker VI 3000 RLE, 2026-04-02).
+     * lsusb identifies these as "Cyber Power System, Inc." regardless of
+     * physical branding. Decode path is identical.
+     *
+     * Confirmed from PowerWalker VI 3000 RLE log (2026-04-02, v15.18):
+     *   rid=0x08 [6 bytes]: byte1=charge(0-100%), byte2:3=runtime uint16 LE (seconds)
+     *   rid=0x0B [2 bytes]: byte1=status flags (0x13=normal, 0x04=transient - TBD)
+     *   NUT driver.version.data: CyberPower HID 0.4
+     *
+     * Rackmount units typically 24V battery. European units 230V nominal.
      * NUT DDL: battery.voltage.nominal=24V */
     {
         .vid         = 0x0764,
         .pid         = 0x0601,
         .vendor_name = "CyberPower",
-        .model_hint  = "OR/PR/RT/UT Series (PID 0601)",
+        .model_hint  = "OR/PR/RT/UT Series + BlueWalker/PowerWalker OEM (PID 0601)",
         .decode_mode = DECODE_CYBERPOWER,
         .quirks      = QUIRK_DIRECT_DECODE |
                        QUIRK_VOLTAGE_LOGMAX_FIX |
